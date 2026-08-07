@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from constants import SiteType, Species
+from constants import Species
 from lattice_build import Lattice
 from paper_parameters import (
     PAPER_DISSOLUTION_PROBABILITY,
@@ -21,17 +21,14 @@ class SonicationParameters:
     """Paper-inspired stochastic corrosion at the particle-solution interface.
 
     The paper specifies a 1 nm sphere and a 10% dissolution probability, but
-    does not report the event frequency.  ``event_rate`` is therefore an input
-    that must be fitted before interpreting KMC time quantitatively.
+    does not report the event frequency.  ``event_rate`` is the KMC propensity
+    per eligible nanoparticle-solution interface center (s^-1 per site), and
+    must be fitted before interpreting KMC time quantitatively.
     """
 
     event_rate: float
     radius_nm: float = PAPER_SONICATION_RADIUS_NM
     dissolution_probability: float = PAPER_DISSOLUTION_PROBABILITY
-    maximum_chemical_potential_boost_ev: float = 0.0
-    events_for_maximum_boost: int = 1
-    mean_field_growth_atoms_per_event: int = 0
-    growth_capture_radius_nm: float = 1.0
 
     def __post_init__(self):
         if self.event_rate < 0.0 or not math.isfinite(self.event_rate):
@@ -40,19 +37,6 @@ class SonicationParameters:
             raise ValueError("radius_nm must be finite and positive")
         if not 0.0 <= self.dissolution_probability <= 1.0:
             raise ValueError("dissolution_probability must be between 0 and 1")
-        if (
-            self.maximum_chemical_potential_boost_ev < 0.0
-            or not math.isfinite(self.maximum_chemical_potential_boost_ev)
-        ):
-            raise ValueError(
-                "maximum_chemical_potential_boost_ev must be finite and non-negative"
-            )
-        if self.events_for_maximum_boost <= 0:
-            raise ValueError("events_for_maximum_boost must be positive")
-        if self.mean_field_growth_atoms_per_event < 0:
-            raise ValueError("mean_field_growth_atoms_per_event must be non-negative")
-        if self.growth_capture_radius_nm <= 0.0:
-            raise ValueError("growth_capture_radius_nm must be positive")
 
 
 @dataclass(frozen=True)
@@ -85,7 +69,11 @@ def build_sonication_event(
 
     return SonicationEvent(
         event_type=SonicationEventType.CORROSION,
-        rate=parameters.event_rate,
+        # This is an n-fold-way aggregation of one identical KMC event for
+        # every eligible interface center.  Selecting the aggregate event and
+        # then choosing a center uniformly is exactly equivalent to storing
+        # every center separately in the event catalog.
+        rate=parameters.event_rate * len(surface_support_site_ids),
         surface_support_site_ids=surface_support_site_ids,
     )
 
@@ -110,59 +98,3 @@ def apply_sonication_event(
     removed_site_ids = local_surface_ids[dissolve]
     lattice.occupation[removed_site_ids] = Species.EMPTY
     return removed_site_ids
-
-
-def apply_mean_field_ripening_growth(
-    lattice: Lattice,
-    parameters: SonicationParameters,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Coarse-grain unresolved donor particles into a local CeOx growth burst.
-
-    The atomistic paper model represents a much larger solution population than
-    the compact OVITO demonstration.  This optional visualization accelerator
-    deposits Ce/O at support growth-front sites close to pre-nucleated Ir.
-    """
-    target_count = parameters.mean_field_growth_atoms_per_event
-    ir_ids = np.flatnonzero(lattice.occupation == Species.IR)
-    if target_count == 0 or len(ir_ids) == 0:
-        return np.empty(0, dtype=np.int32)
-
-    empty_ids = np.flatnonzero(lattice.occupation == Species.EMPTY)
-    empty_positions = lattice.positions_nm[empty_ids]
-    ir_positions = lattice.positions_nm[ir_ids]
-    minimum_distance_squared = np.full(len(empty_ids), np.inf)
-    for ir_position in ir_positions:
-        offsets = empty_positions - ir_position
-        minimum_distance_squared = np.minimum(
-            minimum_distance_squared,
-            np.einsum("ij,ij->i", offsets, offsets),
-        )
-    near_ir_ids = empty_ids[
-        minimum_distance_squared <= parameters.growth_capture_radius_nm**2
-    ]
-
-    ce_candidates = []
-    o_candidates = []
-    for site_id in near_ir_ids:
-        site_id = int(site_id)
-        neighbor_ids = lattice.get_ce_o_neighbors(site_id)
-        neighbor_occupations = lattice.occupation[neighbor_ids]
-        if lattice.site_type[site_id] == SiteType.M:
-            if np.any(neighbor_occupations == Species.O):
-                ce_candidates.append(site_id)
-        elif np.any(
-            (neighbor_occupations == Species.CE)
-            | (neighbor_occupations == Species.IR)
-        ):
-            o_candidates.append(site_id)
-
-    rng.shuffle(ce_candidates)
-    rng.shuffle(o_candidates)
-    number_ce = min(len(ce_candidates), target_count // 3)
-    number_o = min(len(o_candidates), target_count - number_ce)
-    selected_ce = np.asarray(ce_candidates[:number_ce], dtype=np.int32)
-    selected_o = np.asarray(o_candidates[:number_o], dtype=np.int32)
-    lattice.occupation[selected_ce] = Species.CE
-    lattice.occupation[selected_o] = Species.O
-    return np.concatenate((selected_ce, selected_o))

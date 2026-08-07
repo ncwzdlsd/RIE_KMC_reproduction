@@ -1,210 +1,137 @@
-# CeOₓ / Ir 动力学蒙特卡洛复现
+# CeOₓ-Ir 时间分辨动力学蒙特卡洛
 
-本项目使用 Python 实现晶格气体动力学蒙特卡洛（Kinetic Monte Carlo, KMC）模型，用于复现和演示 CeOₓ 载体的形貌演化、Ir 物种在载体表面的迁移/氧化还原，以及超声辅助腐蚀与熟化过程。
+本项目实现 Shi 等人在 *Science* 387 (2025) 补充材料中描述的 CeO₂ 晶格气体
+KMC 模型，并在相同物理时间点比较有、无超声条件。
 
-当前代码主要包含三类计算：
+## 事件模型
 
-- 复现 *Science* 387 (2025) 补充材料图 S34 中公开描述的球形粗糙 CeO₂ 颗粒演化；
-- 生成 Ir 吸附、扩散、还原和氧化过程的短程 OVITO 可视化轨迹；
-- 对比有、无超声条件下的 CeOₓ–Ir 结构演化和 Ir 包埋程度。
+两组条件共享五个可逆反应：Ce 吸附/脱附、O 吸附/脱附、Ir 离子在固液界面
+吸附/脱附、Ir 离子沿载体或已锚定 Ir 团簇扩散，以及 Ir 离子还原/金属 Ir 氧化。超声组额外
+包含论文定义的界面腐蚀事件：随机选择界面中心，1 nm 球内的每个表面 Ce/O 原子
+以 10% 概率溶解。
 
-> [!IMPORTANT]
-> 论文未公开全部动力学参数。代码中的部分频率因子、Ir 动力学参数、表面粗糙度及超声事件速率是显式假设或可视化参数。S34 计算适合比较形貌趋势和事件步数下的结构，不应在未经标定时将 KMC 时间解释为真实物理时间。
+每个当前纳米颗粒-溶液界面 Ce/O 位点都对应一个候选 KMC 超声事件。程序用
+n-fold-way 将这些等速事件聚合：总倾向等于“每界面位点倾向 × 当前界面位点数”，
+事件被选中后再等概率确定中心。这与显式列出全部中心严格等价，不是给整个颗粒设置
+一个与表面积无关的恒定总事件率。补充材料未公开每界面位点倾向，因此该值仍需标定。
 
-## 环境要求
+溶液采用充分混合的隐式表示，不在 20 nm 空盒中放置显式溶质原子。Ce/O 液相仍由
+化学势和超声溶出记账控制；Ir 则使用守恒的有限前驱体储库。晶格只表示固态 CeOₓ
+与附着 Ir；吸附仅发生在
+溶液可达且与载体或已锚定 Ir 接触的位点，避免在液相中产生虚假的 Ir 团簇。
+超声随机移除的 Ce/O 同时进入过量溶质记账；其累计溶出量作为宏观反应浴的浓度
+信号，将有效 Ce/O 化学势从低浓度基线逐渐提高，最高限制为论文考察的 -0.60 eV。
+因此随机腐蚀后会发生再吸附和表面重构，而不是只删除载体原子。
 
-- Python 3.10 或更高版本
+Ir 储库默认按补充材料 Table S9 的 RIE-Ir/CeOₓ ICP-OES 组成缩放：Ir 为
+15.60 wt%，Ce 为 74.96 wt%，对应 `Ir/Ce = 0.15170` 的原子数比。标准 5 nm
+初始载体含 1632 个 Ce 原子，因此每个条件从相同的 248 个 Ir 前驱体原子开始。
+Ir 吸附消耗一个储库原子，Ir 离子脱附归还一个；吸附速率乘以储库剩余比例，耗尽后
+自动变为零。高级入口可用 `--ir-precursor-atoms` 覆盖总投料，但一般无需修改。
+
+Ir形貌采用论文五类反应内的“扩散后还原”机制：离子态Ir的初始扩散频率因子为
+`2.0e-2 s^-1`，还原频率因子为`5.0e-4 s^-1`，使Ir离子在还原冻结前能够沿界面
+寻找较高Ir配位位置。O位点的局部能量同时计入Ce-O和Ir-O邻接，因此CeOₓ能够在
+Ir周围继续生长。金属Ir表面扩散不在论文列出的五类反应中，当前没有擅自加入。
+
+所有正式速率文件使用 `s^-1`。KMC 时钟按
+`dt = -ln(u) / sum(k_i)` 推进，不再使用事件数代替实验时间。
+
+## 环境
+
+- Python 3.10+
 - NumPy
-- OVITO（可选，用于查看 `.xyz` 轨迹）
-
-建议在虚拟环境中运行：
-
-```bash
-python -m venv .venv
-```
-
-如果 Windows 中未配置 `python` 命令，可将下文命令中的 `python` 替换为 Python Launcher 的 `py`（例如 `py -m venv .venv`）。
-
-Windows PowerShell：
+- OVITO（可选）
 
 ```powershell
+py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install numpy
 ```
 
-Linux / macOS：
+## 1. 参数标定
 
-```bash
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install numpy
+补充材料没有公开完整动力学参数。先用 Table S3 的相对粒径曲线和 Table S5 的
+Ce 溶解曲线拟合 Ce/O 交换时间尺度、共享化学势和每界面位点超声事件倾向：
+
+```powershell
+py -3 calibrate_parameters.py `
+  --iterations 40 `
+  --replicates 5 `
+  --output calibrated_parameters.json
 ```
 
-## 快速开始
+生成：
 
-### 1. 小规模检查
+- `calibrated_parameters.json`：带单位、标定范围和目标函数的参数文件；
+- `calibrated_parameters_report.json`：接受的搜索过程和最终误差。
 
-先运行一个很短的 S34 计算，确认环境和输出流程正常：
+只有目标函数低于接受阈值的文件才会标记为 `calibrated: true`。当前实验表格不足以
+唯一标定 Ir 各事件速率，因此 Ir 参数仍在文件中明确标注为初始估计；若要定量解释
+Ir 粒径和包埋比例，还需加入对应时间序列。
 
-```bash
-python run_s34_reproduction.py --steps 1000 --snapshot-steps 0,500,1000 --progress-every 100
+## 2. 运行 0-180 min 对照
+
+直接运行 `run_comparison.py` 即使用 20 nm 盒、5 nm 初始载体和自动缩放的有限 Ir
+储库完成标准对照：
+
+```powershell
+py -3 run_comparison.py
 ```
 
-结果默认写入 `kmc_output/s34_reproduction/`。如果该目录已有检查点，程序会自动从不超过目标步数的最新检查点继续；若希望忽略已有检查点，可添加 `--no-resume`，或通过 `--output` 指定新的目录。
+紧凑晶格：
 
-### 2. 完整 S34 复现
-
-```bash
-python run_s34_reproduction.py
+```powershell
+py -3 run_sonication_comparison.py `
+  --parameter-file calibrated_parameters.json `
+  --target-times-min 0,5,30,60,120,180 `
+  --output kmc_output/time_comparison
 ```
 
-默认设置对应代码中整理出的论文公开条件：
+论文的 20 nm 盒和 5 nm 初始颗粒：
 
-| 参数 | 默认值 |
-| --- | ---: |
-| 晶格盒尺寸 | 20 × 20 × 20 nm³ |
-| CeO₂ 颗粒直径 | 5 nm |
-| 温度 | 453 K |
-| Ce / O 化学势 | −0.60 eV |
-| Ce–O 结合能 | 0.30 eV |
-| 总 KMC 事件数 | 5,000,000 |
-| 快照步数 | 0、1,000,000、3,000,000、5,000,000 |
-| 随机种子 | 2026 |
-
-完整计算包含约 60 万个晶格位点和 500 万次事件，运行时间及磁盘占用会明显高于快速检查。程序使用局部更新的 `FastCeOxKMC` 引擎，并定期保存可恢复的 `.npz` 检查点。
-
-常用参数示例：
-
-```bash
-python run_s34_reproduction.py \
-  --steps 5000000 \
-  --snapshot-steps 0,1000000,3000000,5000000 \
-  --roughness-fraction 0.05 \
-  --checkpoint-every 250000 \
-  --reconcile-every 250000 \
-  --output kmc_output/s34_reproduction
+```powershell
+py -3 run_sonication_comparison.py `
+  --parameter-file calibrated_parameters.json `
+  --target-times-min 0,5,30,60,120,180 `
+  --box-nm 20 `
+  --particle-diameter-nm 5 `
+  --keep-checkpoints `
+  --output kmc_output/paper_geometry
 ```
 
-在 PowerShell 中可将反斜杠续行改为一行命令，或使用反引号 `` ` `` 续行。查看全部选项：
+未通过标定的参数会被正式入口拒绝。仅用于检查程序时可添加
+`--allow-uncalibrated`。
 
-```bash
-python run_s34_reproduction.py --help
-```
+## 输出
 
-### 3. Ir 动力学可视化
+每次运行默认只保留：
 
-```bash
-python run_ir_visualization.py
-```
+- `trajectory.xyz`：0、5、30、60、120、180 min 的有/无超声并排轨迹；
+- `snapshots/*.xyz`：每个取样时间点可单独打开的有/无超声并排结构；
+- `metrics.csv`：相同物理时间下的两组指标及差值，包含 Ir 储库、守恒误差、团簇数、
+  最大团簇、平均Ir-Ir配位、回转半径和形状各向异性；
+- `run_metadata.json`：参数、单位、事件计数和最终状态。
 
-该脚本执行 3,000 步演示计算，每 50 步输出一帧，结果写入带时间戳的 `kmc_output/ir_visualization_YYYYMMDD_HHMMSS/` 目录。脚本内的 Ir 参数经过刻意调整，以便在短轨迹中展示各类事件，仅用于可视化。
+添加 `--keep-checkpoints` 时会额外保留两组最新检查点。OVITO 中直接打开
+`trajectory.xyz`，按 `condition` 着色：`0` 为无超声，`1` 为有超声。
 
-### 4. 超声条件对照
+## 局部更新引擎
 
-```bash
-python run_sonication_comparison.py
-```
+`local_kmc.py` 分别维护 Ce/O、Ir 界面交换、Ir 氧化还原和 Ir 表面扩散速率桶。
+普通事件只刷新两层邻域；超声事件只刷新局部腐蚀区域。外部溶液连通性按
+`--reconcile-every` 周期全局校正，避免封闭孔洞造成长期误差。
+当溶液化学势随超声累计溶出量改变时，Ce/O 各配位速率桶会整体重算，但不重新
+扫描全部位点。
+Ir 交换桶保存满浓度下的本征速率；事件抽样时仅对吸附桶乘以实时储库余量比例，
+因此储库变化不需要全局扫描，同时严格保持 `溶液 Ir + 晶格 Ir = 初始投料`。
 
-默认分别计算 200 步无超声和有超声轨迹，每 50 步保存一帧。也可调整：
+20 nm 论文晶格包含 607,836 个位点。在当前环境中，完整局部引擎初始化约需
+14 秒；实际运行时间取决于标定后的总速率、事件数和连通性校正频率。
 
-```bash
-python run_sonication_comparison.py --steps 1000 --snapshot-every 100 --seed 2026 --sonication-rate 20
-```
+## 模型边界
 
-结果写入带时间戳的 `kmc_output/sonication_comparison_YYYYMMDD_HHMMSS/`。其中 1 nm 腐蚀半径和 10% 溶解概率来自论文描述；超声事件速率和平均场生长脉冲属于可视化设定，不能直接用于定量物理解释。
-
-## 输出文件
-
-不同入口会生成以下文件中的一部分：
-
-| 文件 | 内容 |
-| --- | --- |
-| `snapshot_XXXXXXXX.xyz` | 指定 KMC 步数下的原子结构，可作为 OVITO 文件序列打开 |
-| `metrics.csv` | 粒子数、表面原子数、Ir 包埋比例、事件累计数等随步数的变化 |
-| `event_counts.json` | 最终状态、停止原因和各类事件计数 |
-| `checkpoint_XXXXXXXX.npz` | S34 高性能引擎的可恢复检查点 |
-| `run_metadata.json` | 运行参数、论文设定、显式假设和模型说明 |
-| `comparison_summary.csv` | 有/无超声条件的最终指标对比 |
-| `comparison_process_metrics.csv` | 有/无超声条件在每个输出帧的并列指标及差值 |
-| `OVITO_README.txt` | 当前结果对应的 OVITO 查看提示 |
-
-扩展 XYZ 文件除元素和坐标外，还包含以下属性：
-
-- `surface`：是否位于外表面；
-- `ir_state`：`0` 为非 Ir，`1` 为离子态 Ir，`2` 为金属态 Ir；
-- `embedded`：Ir 是否已不再暴露于外表面；
-- `support_contacts`：Ir 邻近的 Ce/O 载体原子数；
-- `condition`：配对轨迹中的实验条件编号。
-
-### 在 OVITO 中查看
-
-球形颗粒轨迹可打开：
-
-```text
-kmc_output/s34_reproduction/particle/snapshot_00000000.xyz
-```
-
-并选择将同目录快照作为文件序列载入。
-
-超声对照推荐打开结果目录中的：
-
-- `comparison_final.xyz`：最终并排结构；
-- `comparison_ir_environment.xyz`：Ir 周围 1 nm 的局部环境；
-- `paired_process/snapshot_00000000.xyz`：完整结构的配对动画；
-- `paired_ir_environment/snapshot_00000000.xyz`：Ir 局部环境的配对动画。
-
-可按 `species` 或 `ir_state` 着色，并利用 `embedded`、`support_contacts` 和 Slice modifier 检查 Ir 的包埋与载体覆盖情况。
-
-## 模型概览
-
-论文/DFT 参数与代码参数的逐项对应及尚未解决的参数，见
-[`DFT_PARAMETER_MAPPING.md`](DFT_PARAMETER_MAPPING.md)。
-
-晶格由萤石型 CeO₂ 的金属子晶格和氧子晶格组成。通用 KMC 引擎采用基于总速率的无拒绝事件选择，并以指数分布采样时间增量。模型支持：
-
-- Ce/O 吸附与脱附；
-- Ir 离子吸附、脱附和表面扩散；
-- Ir 离子还原与金属 Ir 氧化；
-- 超声诱导的随机界面腐蚀；
-- 用于短程演示的平均场 Ce/O 再沉积；
-- 外部溶液连通性、表面识别及形貌/包埋指标统计。
-
-S34 入口使用按“事件类型 × 局部配位数”分桶的局部更新引擎，以避免在每次事件后重建全局事件目录。吸附还要求目标位点与相反子晶格的晶体原子接触，从而抑制有限盒子中的非物理均匀成核。
-
-## 项目结构
-
-```text
-.
-├── constants.py                    # 位点、物种和通道枚举
-├── lattice_build.py                # 萤石晶格与邻接表构建
-├── generation.py                   # 球形颗粒初始化、表面分析与 XYZ 输出
-├── ceox_events.py                  # Ce/O 事件与速率
-├── ir_events.py                    # Ir 事件与速率
-├── sonication_events.py            # 超声腐蚀和平均场熟化生长
-├── kmc_engine.py                   # 通用 KMC 引擎及指标输出
-├── fast_ceox_kmc.py                # S34 使用的局部更新高性能引擎
-├── run_s34_reproduction.py         # S34 复现入口
-├── run_ir_visualization.py         # Ir 短程可视化入口
-├── run_sonication_comparison.py    # 有/无超声配对对照入口
-├── test_fast_ceox_kmc.py           # 高性能引擎测试
-└── test_sonication_events.py        # 超声事件测试
-```
-
-## 测试
-
-项目使用 Python 标准库 `unittest`：
-
-```bash
-python -m unittest discover -v
-```
-
-测试覆盖高性能引擎与完整事件目录的一致性、检查点恢复，以及超声事件的构建、腐蚀和平均场生长行为。
-
-## 结果解释注意事项
-
-- 固定随机种子可提高可重复性，但随机模型仍应通过多次独立运行评估统计波动。
-- `KMC_time` 由当前相对速率计算；在频率因子未物理标定时，它不是经过验证的实验时间。
-- S34 中未披露的吸附/脱附频率因子比经过拟合，默认目标是重现近似形貌范围，而非证明唯一的微观机制。
-- Ir 可视化和超声对照脚本优先保证机制在短轨迹中可见，不应直接用于论文级定量结论。
-- 每次正式计算都应保留 `run_metadata.json`，并在报告结果时同时记录随机种子和所有非论文参数。
+事件与论文参数的逐项映射见 [DFT_PARAMETER_MAPPING.md](DFT_PARAMETER_MAPPING.md)。
+Table S3/S5 只能约束 Ce/O 时间尺度和超声腐蚀，不能证明唯一微观参数组。如果标定
+目标函数无法通过阈值，说明当前单颗粒/隐式液相模型不足，应扩展多颗粒共享溶液储库
+或多颗粒熟化模型，而不能强行把事件步数映射为分钟。

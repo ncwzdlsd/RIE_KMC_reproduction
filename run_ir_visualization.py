@@ -17,6 +17,8 @@ from kmc_engine import KMCRunConfig, run_KMC
 from lattice_build import build_fluorite_lattice
 from paper_parameters import (
     DFT_CE_O_BINDING_ENERGY_EV,
+    DFT_IR_IR_BINDING_ENERGY_EV,
+    DFT_IR_O_BINDING_ENERGY_EV,
     PAPER_CHEMICAL_POTENTIAL_CE_EV,
     PAPER_CHEMICAL_POTENTIAL_O_EV,
     PAPER_TEMPERATURE_K,
@@ -48,12 +50,12 @@ def main():
         exchange_barrier_ev=0.0,
     )
 
-    # VISUALIZATION-ONLY values.  Fast ion diffusion and slower reduction let
-    # Ir ions travel from the reservoir boundary toward the CeOx surface before
-    # becoming immobile metallic Ir.
+    # Pair energies come from the supplement.  The remaining kinetic values
+    # are visualization-only: fast diffusion and slower reduction let Ir ions
+    # reach CeOx before becoming immobile metallic Ir.
     ir_parameters = IrParameters(
-        ir_ir_binding_energy_ev=0.10,
-        ir_o_binding_energy_ev=0.20,
+        ir_ir_binding_energy_ev=DFT_IR_IR_BINDING_ENERGY_EV,
+        ir_o_binding_energy_ev=DFT_IR_O_BINDING_ENERGY_EV,
         chemical_potential_ir_ion_ev=-0.15,
         reduction_free_energy_ev=-0.10,
         temperature_k=PAPER_TEMPERATURE_K,

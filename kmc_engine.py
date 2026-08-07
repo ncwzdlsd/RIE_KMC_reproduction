@@ -1,14 +1,19 @@
 from collections import Counter
 from dataclasses import dataclass,field
-from dataclasses import replace
 from constants import Species
 from pathlib import Path
 import csv
 import json
 import numpy as np
 import math
-from lattice_build import Lattice,build_fluorite_lattice
-from generation import initialize_sphere,roughen_surface,find_accessible_empty_sites,write_xyz,find_external_surface
+from lattice_build import Lattice
+from generation import (
+    find_accessible_empty_sites,
+    find_external_surface,
+    find_supported_ir_sites,
+    ir_support_contact_count,
+    write_xyz,
+)
 from ceox_events import (CeOxParameters,CeOxEvent,EventType,build_CeOx_event_catalog,apply_CeOx_event)
 from ir_events import (
     IrEvent,
@@ -21,15 +26,8 @@ from sonication_events import (
     SonicationEvent,
     SonicationEventType,
     SonicationParameters,
-    apply_mean_field_ripening_growth,
     apply_sonication_event,
     build_sonication_event,
-)
-from paper_parameters import (
-    DFT_CE_O_BINDING_ENERGY_EV,
-    PAPER_CHEMICAL_POTENTIAL_CE_EV,
-    PAPER_CHEMICAL_POTENTIAL_O_EV,
-    PAPER_TEMPERATURE_K,
 )
 
 KMCEvent = CeOxEvent | IrEvent | SonicationEvent
@@ -56,8 +54,6 @@ class KMCState:
     kmc_time:float=0.0
     event_counts:Counter=field(default_factory=Counter)
     sonication_removed_atoms:int=0
-    sonication_redeposited_atoms:int=0
-    solution_chemical_potential_boost_ev:float=0.0
     stopped_reason:str=""
     def __post_init__(self):
         if self.event_counts is None:
@@ -106,15 +102,14 @@ def calculate_current(lattice:Lattice,state:KMCState):
         (lattice.occupation==Species.IR_ION)
         |(lattice.occupation==Species.IR)
     )
+    supported_ir=find_supported_ir_sites(lattice)
+    attached_ir_ion=int(np.count_nonzero(supported_ir&(lattice.occupation==Species.IR_ION)))
+    attached_ir=int(np.count_nonzero(supported_ir&(lattice.occupation==Species.IR)))
+    attached_ir_total=attached_ir_ion+attached_ir
     ir_support_contact_counts=[]
     for site_id in ir_site_ids:
         site_id=int(site_id)
-        o_neighbors=lattice.get_ce_o_neighbors(site_id)
-        m_neighbors=lattice.get_m_m_neighbors(site_id)
-        ir_support_contact_counts.append(
-            int(np.count_nonzero(lattice.occupation[o_neighbors]==Species.O))
-            +int(np.count_nonzero(lattice.occupation[m_neighbors]==Species.CE))
-        )
+        ir_support_contact_counts.append(ir_support_contact_count(lattice,site_id))
     mean_ir_support_contacts=(
         float(np.mean(ir_support_contact_counts))
         if ir_support_contact_counts else 0.0
@@ -122,6 +117,49 @@ def calculate_current(lattice:Lattice,state:KMCState):
     highly_covered_ir_count=int(
         np.count_nonzero(np.asarray(ir_support_contact_counts)>=8)
     )
+
+    ir_mask=(lattice.occupation==Species.IR_ION)|(lattice.occupation==Species.IR)
+    ir_neighbor_counts=[]
+    for site_id in ir_site_ids:
+        neighbors=lattice.get_m_m_neighbors(int(site_id))
+        ir_neighbor_counts.append(int(np.count_nonzero(ir_mask[neighbors])))
+
+    visited=np.zeros(lattice.nsites,dtype=bool)
+    cluster_site_ids=[]
+    for start in ir_site_ids:
+        start=int(start)
+        if visited[start]:
+            continue
+        visited[start]=True
+        stack=[start]
+        component=[]
+        while stack:
+            site_id=stack.pop()
+            component.append(site_id)
+            for neighbor in lattice.get_m_m_neighbors(site_id):
+                neighbor=int(neighbor)
+                if ir_mask[neighbor] and not visited[neighbor]:
+                    visited[neighbor]=True
+                    stack.append(neighbor)
+        cluster_site_ids.append(component)
+
+    largest_cluster=max(cluster_site_ids,key=len,default=[])
+    largest_cluster_radius_gyration_nm=0.0
+    largest_cluster_shape_anisotropy=0.0
+    if len(largest_cluster)>1:
+        positions=lattice.positions_nm[np.asarray(largest_cluster,dtype=np.int32)]
+        centered=positions-positions.mean(axis=0)
+        gyration_tensor=centered.T@centered/len(positions)
+        eigenvalues=np.maximum(np.linalg.eigvalsh(gyration_tensor),0.0)
+        eigenvalue_sum=float(eigenvalues.sum())
+        largest_cluster_radius_gyration_nm=math.sqrt(eigenvalue_sum)
+        if eigenvalue_sum>0.0:
+            mean_eigenvalue=eigenvalue_sum/3.0
+            largest_cluster_shape_anisotropy=float(
+                1.5
+                *np.square(eigenvalues-mean_eigenvalue).sum()
+                /eigenvalue_sum**2
+            )
 
     volume_per_Ce_nm3=lattice.lattice_constant_nm**3/4.0
     particle_volume_nm3=number_ce*volume_per_Ce_nm3
@@ -135,6 +173,10 @@ def calculate_current(lattice:Lattice,state:KMCState):
         "number_O":number_o,
         "number_Ir_ion":number_ir_ion,
         "number_Ir":number_ir,
+        "attached_Ir_ion":attached_ir_ion,
+        "attached_Ir":attached_ir,
+        "attached_Ir_total":attached_ir_total,
+        "attached_Ir_fraction":attached_ir_total/total_ir if total_ir else 0.0,
         "number_total":number_tot,
         "surface_Ce":surface_ce,
         "surface_O":surface_o,
@@ -147,6 +189,16 @@ def calculate_current(lattice:Lattice,state:KMCState):
         "mean_Ir_support_contacts":mean_ir_support_contacts,
         "highly_covered_Ir_count":highly_covered_ir_count,
         "highly_covered_Ir_fraction":highly_covered_ir_count/total_ir if total_ir else 0.0,
+        "Ir_cluster_count":len(cluster_site_ids),
+        "Ir_nanoparticle_count_ge_3":sum(
+            len(component)>=3 for component in cluster_site_ids
+        ),
+        "largest_Ir_cluster_atoms":len(largest_cluster),
+        "mean_Ir_Ir_coordination":(
+            float(np.mean(ir_neighbor_counts)) if ir_neighbor_counts else 0.0
+        ),
+        "largest_Ir_cluster_radius_gyration_nm":largest_cluster_radius_gyration_nm,
+        "largest_Ir_cluster_shape_anisotropy":largest_cluster_shape_anisotropy,
         "equivalent_diameter_nm":equivalent_diameter_nm,
         "Ce_adsorption_count":state.event_counts[EventType.CE_ADSORPTION.value],
         "Ce_desorption_count":state.event_counts[EventType.CE_DESORPTION.value],
@@ -159,8 +211,6 @@ def calculate_current(lattice:Lattice,state:KMCState):
         "Ir_oxidation_count":state.event_counts[IrEventType.IR_OXIDATION.value],
         "sonication_event_count":state.event_counts[SonicationEventType.CORROSION.value],
         "sonication_removed_atoms":state.sonication_removed_atoms,
-        "sonication_redeposited_atoms":state.sonication_redeposited_atoms,
-        "solution_chemical_potential_boost_ev":state.solution_chemical_potential_boost_ev,
     }
 
 def write_snapshot(output_directory,lattice:Lattice,state:KMCState):
@@ -185,8 +235,6 @@ def write_event_counts(filename,state:KMCState):
         "KMC_time":state.kmc_time,
         "stopped_reason":state.stopped_reason,
         "sonication_removed_atoms":state.sonication_removed_atoms,
-        "sonication_redeposited_atoms":state.sonication_redeposited_atoms,
-        "solution_chemical_potential_boost_ev":state.solution_chemical_potential_boost_ev,
         "event_counts":dict(state.event_counts),
     }
     filename.write_text(json.dumps(data,indent=2,ensure_ascii=False),encoding="utf-8")
@@ -208,34 +256,12 @@ def run_KMC(
     write_snapshot(output_directory,lattice,state)
 
     for target_step in range(1,run_config.number_of_steps+1):
-        current_parameters=parameters
-        if sonication_parameters is not None:
-            exposure_fraction=min(
-                1.0,
-                state.event_counts[SonicationEventType.CORROSION.value]
-                / sonication_parameters.events_for_maximum_boost,
-            )
-            state.solution_chemical_potential_boost_ev=(
-                exposure_fraction
-                * sonication_parameters.maximum_chemical_potential_boost_ev
-            )
-            current_parameters=replace(
-                parameters,
-                chemical_potential_ce_ev=(
-                    parameters.chemical_potential_ce_ev
-                    + state.solution_chemical_potential_boost_ev
-                ),
-                chemical_potential_o_ev=(
-                    parameters.chemical_potential_o_ev
-                    + state.solution_chemical_potential_boost_ev
-                ),
-            )
         accessible=find_accessible_empty_sites(lattice)
         external_surface=find_external_surface(lattice, accessible)
         events: list[KMCEvent]=list(
             build_CeOx_event_catalog(
                 lattice,
-                current_parameters,
+                parameters,
                 accessible=accessible,
                 external_surface=external_surface,
             )
@@ -268,12 +294,6 @@ def run_KMC(
                 rng,
             )
             state.sonication_removed_atoms+=len(removed_site_ids)
-            added_site_ids=apply_mean_field_ripening_growth(
-                lattice,
-                sonication_parameters,
-                rng,
-            )
-            state.sonication_redeposited_atoms+=len(added_site_ids)
         else:
             raise TypeError(f"unsupported KMC event: {type(selected_event).__name__}")
         state.step=target_step
@@ -294,23 +314,3 @@ def run_KMC(
     write_event_counts(output_directory/"event_counts.json",state)
 
     return state,metrics_rows
-
-def main():
-    geometry_rng=np.random.default_rng(2026)
-    lattice=build_fluorite_lattice(ncells=20)
-    initialize_sphere(lattice=lattice,diameter_nm=5.0,oxygen_x=2.0,rng=geometry_rng)
-    roughen_surface(lattice=lattice,fraction=0.05,rng=geometry_rng)
-    parameters=CeOxParameters(
-        temperature_k=PAPER_TEMPERATURE_K,
-        ce_o_binding_energy_ev=DFT_CE_O_BINDING_ENERGY_EV,
-        chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
-        chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
-        adsorption_prefactor=1.0,
-        desorption_prefactor=1.0,
-        exchange_barrier_ev=0.0,
-    )
-    run_config=KMCRunConfig(number_of_steps=200,snapshot_every=50,metrics_every=50,random_seed=2026,output_directory=("kmc_output/""test"))
-    run_KMC(lattice=lattice,parameters=parameters,run_config=run_config)
-
-if __name__=="__main__":
-    main()

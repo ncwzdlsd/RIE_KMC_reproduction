@@ -98,6 +98,39 @@ def roughen_surface(lattice:Lattice,fraction:float=0.05,rng:np.random.Generator=
     return np.asarray(removal_ids,dtype=np.int32)
 
 
+def ir_support_contact_count(lattice:Lattice,site_id:int)->int:
+    """Count direct Ce/O support contacts of an Ir lattice site."""
+    o_neighbors=lattice.get_ce_o_neighbors(site_id)
+    m_neighbors=lattice.get_m_m_neighbors(site_id)
+    return (
+        int(np.count_nonzero(lattice.occupation[o_neighbors]==Species.O))
+        +int(np.count_nonzero(lattice.occupation[m_neighbors]==Species.CE))
+    )
+
+
+def find_supported_ir_sites(lattice:Lattice)->np.ndarray:
+    """Return Ir sites belonging to a cluster anchored to the CeO2 support."""
+    ir_mask=(lattice.occupation==Species.IR_ION)|(lattice.occupation==Species.IR)
+    supported=np.zeros(lattice.nsites,dtype=bool)
+    queue=deque()
+
+    for site_id in np.flatnonzero(ir_mask):
+        site_id=int(site_id)
+        if ir_support_contact_count(lattice,site_id)>0:
+            supported[site_id]=True
+            queue.append(site_id)
+
+    while queue:
+        site_id=queue.popleft()
+        for neighbor_id in lattice.get_m_m_neighbors(site_id):
+            neighbor_id=int(neighbor_id)
+            if ir_mask[neighbor_id] and not supported[neighbor_id]:
+                supported[neighbor_id]=True
+                queue.append(neighbor_id)
+
+    return supported
+
+
 def seed_ir_nanoparticle(
     lattice:Lattice,
     center_nm:np.ndarray,
@@ -140,10 +173,14 @@ def geometry_summart(lattice:Lattice):
         "geometric_diameter_nm":geometric_diameter_nm
     }
 
-def write_xyz(filename,lattice:Lattice,comment=""):
+def write_xyz(filename,lattice:Lattice,comment="",supported_ir_only:bool=False):
     filename=Path(filename)
     filename.parent.mkdir(parents=True,exist_ok=True)
-    occupied_ids=np.flatnonzero(lattice.occupation!=Species.EMPTY)
+    occupied=lattice.occupation!=Species.EMPTY
+    if supported_ir_only:
+        ir_mask=(lattice.occupation==Species.IR_ION)|(lattice.occupation==Species.IR)
+        occupied=occupied&(~ir_mask|find_supported_ir_sites(lattice))
+    occupied_ids=np.flatnonzero(occupied)
     surface=find_external_surface(lattice)
     species_name={
         Species.CE:"Ce",
@@ -176,12 +213,7 @@ def write_xyz(filename,lattice:Lattice,comment=""):
                 ir_state=0
             embedded = int(species in (Species.IR_ION, Species.IR) and not surface[site_id])
             if species in (Species.IR_ION,Species.IR):
-                o_neighbors=lattice.get_ce_o_neighbors(int(site_id))
-                m_neighbors=lattice.get_m_m_neighbors(int(site_id))
-                support_contacts=(
-                    int(np.count_nonzero(lattice.occupation[o_neighbors]==Species.O))
-                    +int(np.count_nonzero(lattice.occupation[m_neighbors]==Species.CE))
-                )
+                support_contacts=ir_support_contact_count(lattice,int(site_id))
             else:
                 support_contacts=0
             f.write(

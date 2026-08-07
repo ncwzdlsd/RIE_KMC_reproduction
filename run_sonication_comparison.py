@@ -1,11 +1,6 @@
-"""Generate paired OVITO trajectories with and without sonication-assisted ripening.
+"""Time-resolved paired KMC simulation with and without sonication."""
 
-The 1 nm corrosion radius and 10% dissolution probability come from the paper.
-The sonication event rate is a visualization parameter because its fitted value
-was not reported in the supplementary information.  A compact mean-field growth
-burst represents Ce/O supplied by unresolved sacrificial particles so that the
-embedding mechanism remains visible in a short trajectory.
-"""
+from __future__ import annotations
 
 import argparse
 import copy
@@ -13,55 +8,56 @@ import csv
 from dataclasses import asdict
 from datetime import datetime
 import json
+import math
 from pathlib import Path
+import shutil
+from collections.abc import Sequence
 
 import numpy as np
 
-from ceox_events import CeOxParameters
-from generation import (
-    initialize_sphere,
-    roughen_surface,
-    seed_ir_nanoparticle,
-)
-from kmc_engine import KMCRunConfig, run_KMC
+from generation import initialize_sphere, roughen_surface
+from kinetic_parameters import KineticParameterSet
 from lattice_build import build_fluorite_lattice
-from paper_parameters import (
-    DFT_CE_O_BINDING_ENERGY_EV,
-    PAPER_DISSOLUTION_PROBABILITY,
-    PAPER_SONICATION_RADIUS_NM,
-    PAPER_TEMPERATURE_K,
-)
-from sonication_events import SonicationParameters
+from local_kmc import LocalKMC
+from paper_parameters import PAPER_TARGET_TIMES_MIN
 
 
 SEPARATION_NM = 8.0
+def parse_times(value: str) -> tuple[float, ...]:
+    try:
+        times = tuple(float(item.strip()) for item in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("times must be comma-separated numbers") from error
+    if not times or any(not math.isfinite(item) or item < 0.0 for item in times):
+        raise argparse.ArgumentTypeError("times must be finite and non-negative")
+    if tuple(sorted(set(times))) != times:
+        raise argparse.ArgumentTypeError("times must be unique and increasing")
+    if times[0] != 0.0:
+        raise argparse.ArgumentTypeError("the first target time must be 0")
+    return times
 
 
-def build_initial_lattice(random_seed: int):
+def build_initial_lattice(
+    random_seed: int,
+    box_nm: float,
+    particle_diameter_nm: float,
+    roughness_fraction: float,
+):
     rng = np.random.default_rng(random_seed)
-    lattice = build_fluorite_lattice(ncells=11)
-    # A compact 4 nm support leaves enough room for pre-nucleated Ir particles
-    # and for the support to grow around them in a short visualization run.
-    initialize_sphere(lattice, diameter_nm=4.0, oxygen_x=2.0, rng=rng)
-    roughen_surface(lattice, fraction=0.05, rng=rng)
-    center = lattice.center_nm
-    for direction in (
-        np.array([1.0, 0.0, 0.0]),
-        np.array([0.0, 1.0, 0.0]),
-        np.array([0.0, 0.0, 1.0]),
-    ):
-        seed_ir_nanoparticle(
-            lattice,
-            center_nm=center + 2.25 * direction,
-            diameter_nm=0.9,
-        )
+    lattice = build_fluorite_lattice(ncells=math.ceil(box_nm / 0.541))
+    initialize_sphere(
+        lattice,
+        diameter_nm=particle_diameter_nm,
+        oxygen_x=2.0,
+        rng=rng,
+    )
+    roughen_surface(lattice, fraction=roughness_fraction, rng=rng)
     return lattice
 
 
-def read_snapshot_records(filename: Path):
-    lines = filename.read_text(encoding="utf-8").splitlines()
+def read_snapshot_records(filename: Path) -> list[tuple]:
     records = []
-    for line in lines[2:]:
+    for line in filename.read_text(encoding="utf-8").splitlines()[2:]:
         fields = line.split()
         records.append(
             (
@@ -78,36 +74,18 @@ def read_snapshot_records(filename: Path):
     return records
 
 
-def filter_ir_environment(records, radius_nm: float):
-    ir_positions = np.asarray(
-        [(record[1], record[2], record[3]) for record in records if record[0] == "Ir"],
-        dtype=float,
-    )
-    if len(ir_positions) == 0:
-        return []
-    kept = []
-    for record in records:
-        position = np.asarray(record[1:4], dtype=float)
-        if np.any(np.linalg.norm(ir_positions - position, axis=1) <= radius_nm):
-            kept.append(record)
-    return kept
-
-
-def write_paired_snapshot(
+def write_paired_frame(
     control_filename: Path,
     sonicated_filename: Path,
     output_filename: Path,
-    environment_radius_nm: float | None = None,
-):
+    sample_time_min: float,
+) -> None:
     paired_records = []
     for condition, source, shift in (
         (0, control_filename, -0.5 * SEPARATION_NM),
         (1, sonicated_filename, 0.5 * SEPARATION_NM),
     ):
-        records = read_snapshot_records(source)
-        if environment_radius_nm is not None:
-            records = filter_ir_environment(records, environment_radius_nm)
-        for name, x, y, z, surface, ir_state, embedded, contacts in records:
+        for name, x, y, z, surface, ir_state, embedded, contacts in read_snapshot_records(source):
             paired_records.append(
                 (
                     name,
@@ -122,13 +100,13 @@ def write_paired_snapshot(
                 )
             )
 
-    output_filename.parent.mkdir(parents=True, exist_ok=True)
     with output_filename.open("w", encoding="utf-8", newline="\n") as output:
         output.write(f"{len(paired_records)}\n")
         output.write(
             "Properties=species:S:1:pos:R:3:surface:I:1:ir_state:I:1:"
             "embedded:I:1:support_contacts:I:1:condition:I:1 "
-            "condition=0:no_sonication condition=1:sonication\n"
+            f"time_min={sample_time_min:g} condition=0:no_sonication "
+            "condition=1:sonication\n"
         )
         for record in paired_records:
             name, x, y, z, surface, ir_state, embedded, contacts, condition = record
@@ -138,59 +116,89 @@ def write_paired_snapshot(
             )
 
 
-def write_paired_process_trajectories(root: Path):
-    control_snapshots = {
-        path.name: path for path in (root / "no_sonication").glob("snapshot_*.xyz")
-    }
-    sonicated_snapshots = {
-        path.name: path for path in (root / "sonication").glob("snapshot_*.xyz")
-    }
-    common_names = sorted(control_snapshots.keys() & sonicated_snapshots.keys())
-    for name in common_names:
-        write_paired_snapshot(
-            control_snapshots[name],
-            sonicated_snapshots[name],
-            root / "paired_process" / name,
-        )
-        write_paired_snapshot(
-            control_snapshots[name],
-            sonicated_snapshots[name],
-            root / "paired_ir_environment" / name,
-            environment_radius_nm=1.0,
-        )
-    return common_names
+def write_trajectory(
+    raw_root: Path,
+    output_filename: Path,
+    target_times_min: tuple[float, ...],
+    snapshot_directory: Path,
+) -> list[Path]:
+    snapshot_directory.mkdir(parents=True, exist_ok=True)
+    for old_snapshot in snapshot_directory.glob("*.xyz"):
+        old_snapshot.unlink()
+
+    snapshot_files = []
+    with output_filename.open("w", encoding="utf-8", newline="\n") as trajectory:
+        for sample_index, time_min in enumerate(target_times_min):
+            name = f"snapshot_{sample_index:04d}.xyz"
+            time_label = f"{time_min:g}".replace(".", "p")
+            frame_file = snapshot_directory / (
+                f"snapshot_{sample_index:02d}_{time_label}min.xyz"
+            )
+            write_paired_frame(
+                raw_root / "no_sonication" / name,
+                raw_root / "sonication" / name,
+                frame_file,
+                time_min,
+            )
+            trajectory.write(frame_file.read_text(encoding="utf-8"))
+            snapshot_files.append(frame_file)
+    return snapshot_files
 
 
-def write_process_metrics(filename: Path, control_metrics, sonicated_metrics):
-    control_by_step = {int(row["step"]): row for row in control_metrics}
-    sonicated_by_step = {int(row["step"]): row for row in sonicated_metrics}
+def write_metrics(
+    filename: Path,
+    control_metrics: list[dict],
+    sonicated_metrics: list[dict],
+) -> None:
     metric_names = (
         "KMC_time",
+        "step",
         "number_Ce",
         "number_O",
+        "number_Ir_ion",
         "number_Ir",
+        "attached_Ir_ion",
+        "attached_Ir",
+        "attached_Ir_total",
+        "attached_Ir_fraction",
         "embedded_Ir_total",
         "Ir_embedding_fraction",
         "mean_Ir_support_contacts",
-        "highly_covered_Ir_fraction",
+        "Ir_cluster_count",
+        "Ir_nanoparticle_count_ge_3",
+        "largest_Ir_cluster_atoms",
+        "mean_Ir_Ir_coordination",
+        "largest_Ir_cluster_radius_gyration_nm",
+        "largest_Ir_cluster_shape_anisotropy",
         "equivalent_diameter_nm",
+        "net_released_Ce_atoms",
+        "net_released_Ce_fraction",
+        "net_released_O_atoms",
+        "net_adsorbed_Ir_atoms",
+        "initial_Ir_precursor_atoms",
+        "solution_Ir_precursor_atoms",
+        "Ir_precursor_fraction_remaining",
+        "Ir_inventory_error_atoms",
+        "solution_excess_Ce_atoms",
+        "solution_excess_O_atoms",
+        "effective_chemical_potential_Ce_ev",
+        "effective_chemical_potential_O_ev",
+        "sonication_removed_Ce_atoms",
+        "sonication_removed_O_atoms",
+        "interface_support_site_count",
+        "sonication_total_propensity_per_s",
         "sonication_event_count",
         "sonication_removed_atoms",
-        "sonication_redeposited_atoms",
-        "solution_chemical_potential_boost_ev",
     )
     rows = []
-    for step in sorted(control_by_step.keys() & sonicated_by_step.keys()):
-        row = {"step": step}
-        for metric_name in metric_names:
-            control_value = control_by_step[step][metric_name]
-            sonicated_value = sonicated_by_step[step][metric_name]
-            row[f"no_sonication_{metric_name}"] = control_value
-            row[f"sonication_{metric_name}"] = sonicated_value
-            if isinstance(control_value, (int, float)) and isinstance(
-                sonicated_value, (int, float)
-            ):
-                row[f"delta_{metric_name}"] = sonicated_value - control_value
+    for control, sonicated in zip(control_metrics, sonicated_metrics):
+        row = {"sample_time_min": control["sample_time_min"]}
+        for name in metric_names:
+            control_value = control[name]
+            sonicated_value = sonicated[name]
+            row[f"no_sonication_{name}"] = control_value
+            row[f"sonication_{name}"] = sonicated_value
+            row[f"delta_{name}"] = sonicated_value - control_value
         rows.append(row)
     with filename.open("w", encoding="utf-8", newline="") as output:
         writer = csv.DictWriter(output, fieldnames=list(rows[0]))
@@ -198,167 +206,213 @@ def write_process_metrics(filename: Path, control_metrics, sonicated_metrics):
         writer.writerows(rows)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--snapshot-every", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument(
-        "--sonication-rate",
-        type=float,
-        default=20.0,
-        help="Visualization-only total event rate; not reported by the paper.",
-    )
-    args = parser.parse_args()
+def run_condition(
+    engine: LocalKMC,
+    target_times_min: tuple[float, ...],
+    output_directory: Path,
+    reconcile_every: int,
+    maximum_events_per_interval: int | None,
+    keep_checkpoint: bool,
+) -> list[dict]:
+    output_directory.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for sample_index, time_min in enumerate(target_times_min):
+        time_seconds = time_min * 60.0
+        engine.advance_to_time(
+            time_seconds,
+            reconcile_every=reconcile_every,
+            maximum_events=maximum_events_per_interval,
+        )
+        row = engine.metrics()
+        row["sample_time_min"] = time_min
+        rows.append(row)
+        engine.write_snapshot(
+            output_directory / f"snapshot_{sample_index:04d}.xyz",
+            sample_time=time_seconds,
+            supported_ir_only=True,
+        )
+        if keep_checkpoint:
+            engine.save_checkpoint(output_directory / "checkpoint_latest.npz")
+    return rows
 
-    initial_lattice = build_initial_lattice(args.seed)
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--target-times-min",
+        type=parse_times,
+        default=PAPER_TARGET_TIMES_MIN,
+        help="Increasing comma-separated times; default: 0,5,30,60,120,180.",
+    )
+    parser.add_argument("--parameter-file", type=Path)
+    parser.add_argument(
+        "--allow-uncalibrated",
+        action="store_true",
+        help="Allow built-in initial guesses or an uncalibrated parameter file.",
+    )
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--box-nm", type=float, default=4.8)
+    parser.add_argument("--particle-diameter-nm", type=float, default=4.0)
+    parser.add_argument("--roughness-fraction", type=float, default=0.05)
+    parser.add_argument(
+        "--ir-precursor-atoms",
+        type=int,
+        help=(
+            "Override the finite total Ir inventory. By default it is scaled "
+            "from the initial Ce count using the Table S9 RIE Ir/Ce ratio."
+        ),
+    )
+    parser.add_argument("--reconcile-every", type=int, default=100_000)
+    parser.add_argument("--maximum-events-per-interval", type=int)
+    parser.add_argument("--keep-checkpoints", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.box_nm <= args.particle_diameter_nm:
+        parser.error("--box-nm must exceed --particle-diameter-nm")
+    if not 0.0 <= args.roughness_fraction <= 1.0:
+        parser.error("--roughness-fraction must be between 0 and 1")
+    if args.reconcile_every < 0:
+        parser.error("--reconcile-every must be non-negative")
+    if args.maximum_events_per_interval is not None and args.maximum_events_per_interval <= 0:
+        parser.error("--maximum-events-per-interval must be positive")
+    if args.ir_precursor_atoms is not None and args.ir_precursor_atoms <= 0:
+        parser.error("--ir-precursor-atoms must be positive")
+
+    parameters = (
+        KineticParameterSet.read(args.parameter_file)
+        if args.parameter_file is not None
+        else KineticParameterSet()
+    )
+    if not parameters.calibrated and not args.allow_uncalibrated:
+        parser.error(
+            "physical-time simulation requires calibrated parameters; run "
+            "calibrate_parameters.py or pass --allow-uncalibrated for diagnostics"
+        )
+
+    initial_lattice = build_initial_lattice(
+        args.seed,
+        args.box_nm,
+        args.particle_diameter_nm,
+        args.roughness_fraction,
+    )
     control_lattice = copy.deepcopy(initial_lattice)
     sonicated_lattice = copy.deepcopy(initial_lattice)
-
-    ceox_parameters = CeOxParameters(
-        temperature_k=PAPER_TEMPERATURE_K,
-        ce_o_binding_energy_ev=DFT_CE_O_BINDING_ENERGY_EV,
-        chemical_potential_ce_ev=-0.69,
-        chemical_potential_o_ev=-0.69,
-        adsorption_prefactor=1.0,
-        desorption_prefactor=1.0,
-        exchange_barrier_ev=0.0,
+    control_engine = LocalKMC(
+        control_lattice,
+        parameters.ceox_parameters(),
+        parameters.ir_parameters(),
+        random_seed=args.seed,
+        initial_ir_precursor_atoms=args.ir_precursor_atoms,
     )
-    sonication_parameters = SonicationParameters(
-        event_rate=args.sonication_rate,
-        radius_nm=PAPER_SONICATION_RADIUS_NM,
-        dissolution_probability=PAPER_DISSOLUTION_PROBABILITY,
-        maximum_chemical_potential_boost_ev=0.09,
-        events_for_maximum_boost=10,
-        mean_field_growth_atoms_per_event=24,
-        growth_capture_radius_nm=1.0,
+    sonicated_engine = LocalKMC(
+        sonicated_lattice,
+        parameters.ceox_parameters(),
+        parameters.ir_parameters(),
+        sonication_parameters=parameters.sonication_parameters(),
+        random_seed=args.seed,
+        initial_ir_precursor_atoms=args.ir_precursor_atoms,
     )
 
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    root = Path("kmc_output") / f"sonication_comparison_{run_stamp}"
-    common_config = dict(
-        number_of_steps=args.steps,
-        snapshot_every=args.snapshot_every,
-        metrics_every=args.snapshot_every,
-        random_seed=args.seed,
+    root = args.output or Path("kmc_output") / f"time_comparison_{run_stamp}"
+    raw_root = root / "_raw"
+    control_metrics = run_condition(
+        control_engine,
+        args.target_times_min,
+        raw_root / "no_sonication",
+        args.reconcile_every,
+        args.maximum_events_per_interval,
+        args.keep_checkpoints,
+    )
+    sonicated_metrics = run_condition(
+        sonicated_engine,
+        args.target_times_min,
+        raw_root / "sonication",
+        args.reconcile_every,
+        args.maximum_events_per_interval,
+        args.keep_checkpoints,
     )
 
-    control_state, control_metrics = run_KMC(
-        control_lattice,
-        ceox_parameters,
-        KMCRunConfig(
-            **common_config,
-            output_directory=str(root / "no_sonication"),
-        ),
+    snapshot_files = write_trajectory(
+        raw_root,
+        root / "trajectory.xyz",
+        args.target_times_min,
+        root / "snapshots",
     )
-    sonicated_state, sonicated_metrics = run_KMC(
-        sonicated_lattice,
-        ceox_parameters,
-        KMCRunConfig(
-            **common_config,
-            output_directory=str(root / "sonication"),
-        ),
-        sonication_parameters=sonication_parameters,
-    )
-
-    paired_snapshot_names = write_paired_process_trajectories(root)
-    write_process_metrics(
-        root / "comparison_process_metrics.csv",
-        control_metrics,
-        sonicated_metrics,
-    )
-    final_snapshot_name = f"snapshot_{args.steps:08d}.xyz"
-    write_paired_snapshot(
-        root / "no_sonication" / final_snapshot_name,
-        root / "sonication" / final_snapshot_name,
-        root / "comparison_final.xyz",
-    )
-    write_paired_snapshot(
-        root / "no_sonication" / final_snapshot_name,
-        root / "sonication" / final_snapshot_name,
-        root / "comparison_ir_environment.xyz",
-        environment_radius_nm=1.0,
-    )
-    summary_rows = []
-    for condition, state, metrics in (
-        ("no_sonication", control_state, control_metrics[-1]),
-        ("sonication", sonicated_state, sonicated_metrics[-1]),
-    ):
-        summary_rows.append(
-            {
-                "condition": condition,
-                "step": state.step,
-                "KMC_time": metrics["KMC_time"],
-                "number_Ce": metrics["number_Ce"],
-                "number_O": metrics["number_O"],
-                "number_Ir_ion": metrics["number_Ir_ion"],
-                "number_Ir": metrics["number_Ir"],
-                "embedded_Ir_total": metrics["embedded_Ir_total"],
-                "Ir_embedding_fraction": metrics["Ir_embedding_fraction"],
-                "mean_Ir_support_contacts": metrics["mean_Ir_support_contacts"],
-                "highly_covered_Ir_fraction": metrics[
-                    "highly_covered_Ir_fraction"
-                ],
-                "equivalent_diameter_nm": metrics["equivalent_diameter_nm"],
-                "sonication_event_count": metrics["sonication_event_count"],
-                "sonication_removed_atoms": metrics["sonication_removed_atoms"],
-                "sonication_redeposited_atoms": metrics[
-                    "sonication_redeposited_atoms"
-                ],
-                "solution_chemical_potential_boost_ev": metrics[
-                    "solution_chemical_potential_boost_ev"
-                ],
-            }
-        )
-    with (root / "comparison_summary.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as output:
-        writer = csv.DictWriter(output, fieldnames=list(summary_rows[0]))
-        writer.writeheader()
-        writer.writerows(summary_rows)
-
+    write_metrics(root / "metrics.csv", control_metrics, sonicated_metrics)
     metadata = {
-        "purpose": "short paired OVITO comparison of catalyst-support formation",
-        "arguments": vars(args),
-        "ceox_parameters": asdict(ceox_parameters),
-        "sonication_parameters": asdict(sonication_parameters),
-        "paired_snapshot_names": paired_snapshot_names,
+        "target_times_min": args.target_times_min,
+        "arguments": {
+            **vars(args),
+            "target_times_min": list(args.target_times_min),
+            "parameter_file": str(args.parameter_file) if args.parameter_file else None,
+            "output": str(args.output) if args.output else None,
+        },
+        "kinetic_parameters": asdict(parameters),
+        "rate_unit": "s^-1",
+        "time_unit": "s",
+        "environment_model": {
+            "solution": "implicit_well_mixed_solution",
+            "lattice": "solid_CeOx_and_supported_Ir_only",
+            "ce_o_exchange": "solution_exposed_CeOx_growth_sites",
+            "o_ir_interface": "O adsorption/desorption includes adjacent ionic and metallic Ir binding",
+            "ce_o_inventory": "sonication/desorption add excess atoms; adsorption consumes the explicit excess ledger",
+            "chemical_potential_response": "bath-scale cumulative sonication dissolution signal, capped by kinetic parameters",
+            "sonication_event_catalog": "one_candidate_KMC_event_per_current_nanoparticle_solution_interface_site",
+            "sonication_event_selection": "n_fold_way_total_propensity_then_uniform_interface_center",
+            "sonication_rate_parameter_unit": "s^-1_per_interface_site",
+            "ir_exchange": "solution_exposed_support_or_anchored_Ir_sites",
+            "ir_inventory": "finite_conserved_precursor_reservoir",
+            "ir_adsorption_activity": "remaining_precursor_fraction",
+            "initial_ir_precursor_atoms": control_engine.initial_ir_precursor_atoms,
+            "ir_capacity_basis": "Table_S9_RIE_Ir_to_Ce_atom_ratio_scaled_by_initial_Ce",
+            "ir_diffusion": "support_or_anchored_Ir_interface_only",
+            "ir_morphology": "diffusion_dominated_ionic_relaxation_before_reduction",
+            "metallic_ir_surface_diffusion": False,
+            "bulk_ir_reduction": False,
+        },
         "condition_labels": {"0": "no_sonication", "1": "sonication"},
-        "model_note": (
-            "Mean-field growth bursts are a visualization accelerator for "
-            "unresolved donor particles and are not a fitted paper parameter."
-        ),
+        "snapshot_files": [
+            str(path.relative_to(root)) for path in snapshot_files
+        ],
+        "final_metrics": {
+            "no_sonication": control_metrics[-1],
+            "sonication": sonicated_metrics[-1],
+        },
+        "event_counts": {
+            "no_sonication": dict(control_engine.state.event_counts),
+            "sonication": dict(sonicated_engine.state.event_counts),
+        },
     }
     (root / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-
-    (root / "OVITO_README.txt").write_text(
-        "Open comparison_final.xyz for the final side-by-side view.\n"
-        "Open comparison_ir_environment.xyz for the clearest local comparison;\n"
-        "it contains only Ir and atoms within 1 nm of Ir.\n"
-        "Left: condition=0 (no sonication). Right: condition=1 (sonication).\n"
-        "For a paired full-particle animation, open\n"
-        "paired_process/snapshot_00000000.xyz as a file sequence.\n"
-        "For a paired local Ir-environment animation, open\n"
-        "paired_ir_environment/snapshot_00000000.xyz as a file sequence.\n"
-        "Each frame uses the same step for both conditions. KMC_time differs\n"
-        "because the two event catalogs have different total rates.\n"
-        "comparison_process_metrics.csv contains the values at every frame.\n"
-        "Select Particle Type Ir, then color by embedded or ir_state.\n"
-        "embedded=1 means an Ir site is no longer on the external surface.\n"
-        "For early embedding, color Ir by support_contacts; larger values mean\n"
-        "more neighboring Ce/O atoms and stronger support coverage.\n"
-        "The initial metallic Ir nanoparticles are identical in both conditions.\n"
-        "Sonication raises the mean-field Ce/O solution chemical potential from\n"
-        "-0.69 eV toward -0.60 eV after interfacial corrosion events.\n"
-        "Use a Slice modifier to inspect how CeOx grows around Ir.\n",
-        encoding="utf-8",
-    )
+    if not args.keep_checkpoints:
+        shutil.rmtree(raw_root)
+    else:
+        for path in raw_root.rglob("snapshot_*.xyz"):
+            path.unlink()
+        frame = raw_root / "paired_frame.xyz"
+        if frame.exists():
+            frame.unlink()
 
     print(f"Output directory: {root.resolve()}")
-    for row in summary_rows:
-        print(row)
+    print(f"Individual snapshots: {(root / 'snapshots').resolve()}")
+    print(
+        f"No sonication: {control_engine.state.step:,} events, "
+        f"t={control_engine.state.kmc_time / 60.0:.1f} min"
+    )
+    print(
+        f"Sonication: {sonicated_engine.state.step:,} events, "
+        f"t={sonicated_engine.state.kmc_time / 60.0:.1f} min"
+    )
+    print(
+        "Finite Ir precursor per condition: "
+        f"{control_engine.initial_ir_precursor_atoms} atoms; remaining "
+        f"no-sonication={control_engine.state.solution_ir_precursor_atoms}, "
+        f"sonication={sonicated_engine.state.solution_ir_precursor_atoms}"
+    )
 
 
 if __name__ == "__main__":
