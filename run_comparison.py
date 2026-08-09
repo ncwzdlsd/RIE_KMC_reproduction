@@ -23,7 +23,9 @@ PARTICLE_DIAMETER_NM = 5.0
 RANDOM_SEED = 2025
 PROJECT_ROOT = Path(__file__).resolve().parent
 PARAMETER_FILE = PROJECT_ROOT / "calibrated_parameters.json"
-OUTPUT_DIRECTORY = PROJECT_ROOT / "kmc_output" / "comparison_180min"
+# This is a naming hint, not a reusable directory.  The comparison runner
+# appends a high-resolution timestamp and atomically reserves a new folder.
+OUTPUT_DIRECTORY_HINT = PROJECT_ROOT / "kmc_output" / "comparison_180min"
 
 
 def build_arguments() -> list[str]:
@@ -37,7 +39,7 @@ def build_arguments() -> list[str]:
         "--seed",
         str(RANDOM_SEED),
         "--output",
-        str(OUTPUT_DIRECTORY),
+        str(OUTPUT_DIRECTORY_HINT),
     ]
 
     if PARAMETER_FILE.exists():

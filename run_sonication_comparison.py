@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 import json
 import math
@@ -19,10 +19,37 @@ from generation import initialize_sphere, roughen_surface
 from kinetic_parameters import KineticParameterSet
 from lattice_build import build_fluorite_lattice
 from local_kmc import LocalKMC
-from paper_parameters import PAPER_TARGET_TIMES_MIN
+from paper_parameters import (
+    PAPER_CHEMICAL_POTENTIAL_CE_EV,
+    PAPER_CHEMICAL_POTENTIAL_O_EV,
+    PAPER_TARGET_TIMES_MIN,
+)
 
 
 SEPARATION_NM = 8.0
+
+
+def allocate_run_directory(output_hint: Path | None) -> Path:
+    """Reserve a timestamped directory without ever reusing an old run."""
+    if output_hint is None:
+        parent = Path("kmc_output")
+        prefix = "time_comparison"
+    else:
+        parent = output_hint.parent
+        prefix = output_hint.name
+    parent.mkdir(parents=True, exist_ok=True)
+    for collision_index in range(10_000):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        collision_suffix = "" if collision_index == 0 else f"_{collision_index:04d}"
+        candidate = parent / f"{prefix}_{stamp}{collision_suffix}"
+        try:
+            candidate.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError("could not allocate a unique output directory")
+
+
 def parse_times(value: str) -> tuple[float, ...]:
     try:
         times = tuple(float(item.strip()) for item in value.split(","))
@@ -123,8 +150,6 @@ def write_trajectory(
     snapshot_directory: Path,
 ) -> list[Path]:
     snapshot_directory.mkdir(parents=True, exist_ok=True)
-    for old_snapshot in snapshot_directory.glob("*.xyz"):
-        old_snapshot.unlink()
 
     snapshot_files = []
     with output_filename.open("w", encoding="utf-8", newline="\n") as trajectory:
@@ -182,8 +207,6 @@ def write_metrics(
         "solution_Ir_precursor_atoms",
         "Ir_precursor_fraction_remaining",
         "Ir_inventory_error_atoms",
-        "solution_excess_Ce_atoms",
-        "solution_excess_O_atoms",
         "effective_chemical_potential_Ce_ev",
         "effective_chemical_potential_O_ev",
         "sonication_removed_Ce_atoms",
@@ -254,7 +277,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Allow built-in initial guesses or an uncalibrated parameter file.",
     )
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "Output naming hint. A timestamp is always appended so an "
+            "existing run is never overwritten."
+        ),
+    )
     parser.add_argument("--box-nm", type=float, default=4.8)
     parser.add_argument("--particle-diameter-nm", type=float, default=4.0)
     parser.add_argument("--roughness-fraction", type=float, default=0.05)
@@ -287,6 +317,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.parameter_file is not None
         else KineticParameterSet()
     )
+    # The formal comparison is the fixed-high-chemical-potential case used in
+    # supplementary Figs. S31/S34.  A legacy parameter file may contain the
+    # former -0.69 -> -0.60 feedback settings, so force the selected bath here.
+    parameters = replace(
+        parameters,
+        chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
+        chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
+    )
     if not parameters.calibrated and not args.allow_uncalibrated:
         parser.error(
             "physical-time simulation requires calibrated parameters; run "
@@ -317,8 +355,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         initial_ir_precursor_atoms=args.ir_precursor_atoms,
     )
 
-    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    root = args.output or Path("kmc_output") / f"time_comparison_{run_stamp}"
+    root = allocate_run_directory(args.output)
     raw_root = root / "_raw"
     control_metrics = run_condition(
         control_engine,
@@ -355,13 +392,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         "kinetic_parameters": asdict(parameters),
         "rate_unit": "s^-1",
         "time_unit": "s",
+        "output_directory": str(root.resolve()),
+        "output_policy": "unique_timestamped_directory_never_overwrite",
         "environment_model": {
             "solution": "implicit_well_mixed_solution",
             "lattice": "CeOx_support_plus_explicit_box_transport_Ir_on_M_sites",
             "ce_o_exchange": "solution_exposed_CeOx_growth_sites",
             "o_ir_interface": "O adsorption/desorption includes adjacent ionic and metallic Ir binding",
-            "ce_o_inventory": "sonication/desorption add excess atoms; adsorption consumes the explicit excess ledger",
-            "chemical_potential_response": "bath-scale cumulative sonication dissolution signal, capped by kinetic parameters",
+            "ce_o_inventory": "grand canonical; net exchange is derived from event counts only",
+            "chemical_potential_response": "fixed; no feedback from desorption or cumulative sonication dissolution",
+            "fixed_chemical_potential_Ce_ev": parameters.chemical_potential_ce_ev,
+            "fixed_chemical_potential_O_ev": parameters.chemical_potential_o_ev,
             "sonication_event_catalog": "one_candidate_KMC_event_per_current_nanoparticle_solution_interface_site",
             "sonication_event_selection": "n_fold_way_total_propensity_then_uniform_interface_center",
             "sonication_rate_parameter_unit": "s^-1_per_interface_site",

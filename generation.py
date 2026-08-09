@@ -2,7 +2,8 @@ from collections import deque
 from pathlib import Path
 import numpy as np
 
-from lattice_build import Lattice,SiteType,Species,build_fluorite_lattice
+from constants import SiteType, Species
+from lattice_build import Lattice
 
 def initialize_sphere(lattice:Lattice,diameter_nm:float=5.0,oxygen_x:float=2.0,rng:np.random.Generator=None):
     if rng is None:
@@ -25,16 +26,6 @@ def initialize_sphere(lattice:Lattice,diameter_nm:float=5.0,oxygen_x:float=2.0,r
     oxygen_occupied=oxygen_site_ids[rng.random(len(oxygen_site_ids))<oxygen_occupancy_probability]
 
     lattice.occupation[oxygen_occupied]=Species.O
-
-def support_cordination(lattice:Lattice,site_id:int)->int:
-    current_species=Species(lattice.occupation[site_id])
-    neighbor_ids=(lattice.get_ce_o_neighbors(site_id))
-    neighbor_species=Species(lattice.occupation[neighbor_ids])
-
-    if current_species==Species.CE:
-        return np.count_nonzero(neighbor_species==Species.O)
-    if current_species==Species.O:
-        return np.count_nonzero(neighbor_species==Species.CE)
 
 def find_accessible_empty_sites(lattice:Lattice):
     empty=(lattice.occupation==Species.EMPTY)
@@ -131,48 +122,6 @@ def find_supported_ir_sites(lattice:Lattice)->np.ndarray:
     return supported
 
 
-def seed_ir_nanoparticle(
-    lattice:Lattice,
-    center_nm:np.ndarray,
-    diameter_nm:float,
-) -> np.ndarray:
-    """Place a pre-nucleated metallic Ir particle on currently empty M sites."""
-    if diameter_nm <= 0.0:
-        raise ValueError("diameter_nm must be positive")
-    relative_positions=lattice.positions_nm-np.asarray(center_nm,dtype=float)
-    within_particle=np.einsum(
-        "ij,ij->i",relative_positions,relative_positions
-    ) <= (0.5*diameter_nm)**2
-    ir_site_ids=np.flatnonzero(
-        within_particle
-        &(lattice.site_type==SiteType.M)
-        &(lattice.occupation==Species.EMPTY)
-    )
-    lattice.occupation[ir_site_ids]=Species.IR
-    return ir_site_ids.astype(np.int32,copy=False)
-
-def geometry_summart(lattice:Lattice):
-    number_ce=int(np.count_nonzero(lattice.occupation==Species.CE))
-    number_o=int(np.count_nonzero(lattice.occupation==Species.O))
-    surface=find_external_surface(lattice)
-    number_surface_ce=int(np.count_nonzero(surface&(lattice.occupation==Species.CE)))
-    number_surface_o=int(np.count_nonzero(surface&(lattice.occupation==Species.O)))
-    occupied_ids=np.flatnonzero((lattice.occupation==Species.CE)|(lattice.occupation==Species.O))
-
-    if len(occupied_ids)>0:
-        distances=np.linalg.norm(lattice.positions_nm[occupied_ids]-lattice.center_nm,axis=1)
-        geometric_diameter_nm=2.0*distances.max()    
-    else:geometric_diameter_nm=0.0
-
-    return {
-        "number_ce":number_ce,
-        "number_o":number_o,
-        "o_to_ce":number_o/number_ce if number_ce>0 else 0.0,
-        "surface_ce":number_surface_ce,
-        "surface_o":number_surface_o,
-        "geometric_diameter_nm":geometric_diameter_nm
-    }
-
 def write_xyz(filename,lattice:Lattice,comment="",supported_ir_only:bool=False):
     filename=Path(filename)
     filename.parent.mkdir(parents=True,exist_ok=True)
@@ -220,15 +169,3 @@ def write_xyz(filename,lattice:Lattice,comment="",supported_ir_only:bool=False):
                 f"{name} {x:.6f} {y:.6f} {z:.6f} "
                 f"{is_surface} {ir_state} {embedded} {support_contacts}\n"
             )
-
-def main():
-    rng=np.random.default_rng(2026)
-
-    lattice=build_fluorite_lattice(ncells=20)
-
-    initialize_sphere(lattice=lattice,diameter_nm=5.0,oxygen_x=2.0,rng=rng)
-    initial_summary=geometry_summart(lattice)
-    write_xyz("output/initial_sphere.xyz",lattice)
-
-if __name__=="__main__":
-    main()

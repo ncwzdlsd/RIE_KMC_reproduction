@@ -13,6 +13,8 @@ from paper_parameters import (
     DFT_IR_IR_BINDING_ENERGY_EV,
     DFT_IR_O_BINDING_ENERGY_EV,
     PAPER_DISSOLUTION_PROBABILITY,
+    PAPER_CHEMICAL_POTENTIAL_CE_EV,
+    PAPER_CHEMICAL_POTENTIAL_O_EV,
     PAPER_RIE_IR_TO_CE_ATOM_RATIO,
     PAPER_SONICATION_RADIUS_NM,
     PAPER_TEMPERATURE_K,
@@ -29,10 +31,11 @@ class KineticParameterSet:
     ce_adsorption_prefactor_s: float = 1.0e-3
     ce_desorption_prefactor_s: float = 1.0e-3
     ce_exchange_barrier_ev: float = 0.0
-    chemical_potential_ce_ev: float = -0.69
-    chemical_potential_o_ev: float = -0.69
-    maximum_chemical_potential_ce_o_ev: float = -0.60
-    excess_reservoir_saturation_fraction: float = 0.01
+    # The paper-style comparison uses the fixed high-concentration bath from
+    # Figs. S31/S34.  Dissolved Ce/O is diagnostic and does not feed back into
+    # either chemical potential during a run.
+    chemical_potential_ce_ev: float = PAPER_CHEMICAL_POTENTIAL_CE_EV
+    chemical_potential_o_ev: float = PAPER_CHEMICAL_POTENTIAL_O_EV
 
     ir_adsorption_prefactor_s: float = 1.0e-4
     ir_desorption_prefactor_s: float = 1.0e-5
@@ -75,15 +78,6 @@ class KineticParameterSet:
             adsorption_prefactor=self.ce_adsorption_prefactor_s,
             desorption_prefactor=self.ce_desorption_prefactor_s,
             exchange_barrier_ev=self.ce_exchange_barrier_ev,
-            maximum_chemical_potential_ce_ev=(
-                self.maximum_chemical_potential_ce_o_ev
-            ),
-            maximum_chemical_potential_o_ev=(
-                self.maximum_chemical_potential_ce_o_ev
-            ),
-            excess_reservoir_saturation_fraction=(
-                self.excess_reservoir_saturation_fraction
-            ),
         )
 
     def ir_parameters(self) -> IrParameters:
@@ -116,31 +110,14 @@ class KineticParameterSet:
     def scaled(
         self,
         ce_scale: float = 1.0,
-        ir_scale: float = 1.0,
         sonication_scale: float = 1.0,
-        chemical_potential_ce_o_ev: float | None = None,
     ) -> "KineticParameterSet":
         return replace(
             self,
             ce_adsorption_prefactor_s=self.ce_adsorption_prefactor_s * ce_scale,
             ce_desorption_prefactor_s=self.ce_desorption_prefactor_s * ce_scale,
-            ir_adsorption_prefactor_s=self.ir_adsorption_prefactor_s * ir_scale,
-            ir_desorption_prefactor_s=self.ir_desorption_prefactor_s * ir_scale,
-            ir_diffusion_prefactor_s=self.ir_diffusion_prefactor_s * ir_scale,
-            ir_reduction_prefactor_s=self.ir_reduction_prefactor_s * ir_scale,
-            ir_oxidation_prefactor_s=self.ir_oxidation_prefactor_s * ir_scale,
             sonication_event_rate_s=(
                 self.sonication_event_rate_s * sonication_scale
-            ),
-            chemical_potential_ce_ev=(
-                self.chemical_potential_ce_ev
-                if chemical_potential_ce_o_ev is None
-                else chemical_potential_ce_o_ev
-            ),
-            chemical_potential_o_ev=(
-                self.chemical_potential_o_ev
-                if chemical_potential_ce_o_ev is None
-                else chemical_potential_ce_o_ev
             ),
             calibrated=False,
             calibration_objective=None,
@@ -167,4 +144,9 @@ class KineticParameterSet:
             raise ValueError("unsupported kinetic-parameter schema")
         if payload.get("rate_unit") != "s^-1":
             raise ValueError("kinetic parameter rates must use s^-1")
-        return cls(**payload["parameters"])
+        parameters = dict(payload["parameters"])
+        # Read parameter files written by the former dynamic-chemical-
+        # potential implementation without restoring that feedback model.
+        parameters.pop("maximum_chemical_potential_ce_o_ev", None)
+        parameters.pop("excess_reservoir_saturation_fraction", None)
+        return cls(**parameters)

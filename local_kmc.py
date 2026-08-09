@@ -17,6 +17,7 @@ from generation import (
     find_accessible_empty_sites,
     find_external_surface,
     find_supported_ir_sites,
+    ir_support_contact_count,
     write_xyz,
 )
 from ir_events import (
@@ -26,7 +27,6 @@ from ir_events import (
     is_supported_reduction_site,
     local_ir_binding_energy,
 )
-from kmc_engine import calculate_current
 from lattice_build import Lattice
 from sonication_events import SonicationEventType, SonicationParameters
 
@@ -47,10 +47,130 @@ class LocalKMCState:
     sonication_removed_atoms: int = 0
     sonication_removed_ce_atoms: int = 0
     sonication_removed_o_atoms: int = 0
-    solution_excess_ce_atoms: int = 0
-    solution_excess_o_atoms: int = 0
     solution_ir_precursor_atoms: int | None = None
     stopped_reason: str = ""
+
+
+def calculate_current(lattice: Lattice, state: LocalKMCState) -> dict:
+    """Calculate only the morphology metrics consumed by the formal runner."""
+    occupation = lattice.occupation
+    number_ce = int(np.count_nonzero(occupation == Species.CE))
+    number_o = int(np.count_nonzero(occupation == Species.O))
+    number_ir_ion = int(np.count_nonzero(occupation == Species.IR_ION))
+    number_ir = int(np.count_nonzero(occupation == Species.IR))
+    total_ir = number_ir_ion + number_ir
+
+    external_surface = find_external_surface(lattice)
+    ir_mask = (occupation == Species.IR_ION) | (occupation == Species.IR)
+    supported_ir = find_supported_ir_sites(lattice)
+    attached_ir_ion = int(
+        np.count_nonzero(supported_ir & (occupation == Species.IR_ION))
+    )
+    attached_ir = int(
+        np.count_nonzero(supported_ir & (occupation == Species.IR))
+    )
+    attached_ir_total = attached_ir_ion + attached_ir
+    unattached_ir_ion = number_ir_ion - attached_ir_ion
+    unattached_ir = number_ir - attached_ir
+    unattached_ir_total = unattached_ir_ion + unattached_ir
+    embedded_ir_total = int(
+        np.count_nonzero(supported_ir & ir_mask & ~external_surface)
+    )
+
+    # These are the same supported Ir sites written to the public XYZ files;
+    # transport ions elsewhere in the box remain only in inventory metrics.
+    ir_site_ids = np.flatnonzero(ir_mask & supported_ir)
+    support_contacts = [
+        ir_support_contact_count(lattice, int(site_id))
+        for site_id in ir_site_ids
+    ]
+    ir_neighbor_counts = []
+    for site_id in ir_site_ids:
+        neighbors = lattice.get_m_m_neighbors(int(site_id))
+        ir_neighbor_counts.append(int(np.count_nonzero(ir_mask[neighbors])))
+
+    visited = np.zeros(lattice.nsites, dtype=bool)
+    clusters: list[list[int]] = []
+    for start in ir_site_ids:
+        start = int(start)
+        if visited[start]:
+            continue
+        visited[start] = True
+        stack = [start]
+        component = []
+        while stack:
+            site_id = stack.pop()
+            component.append(site_id)
+            for neighbor in lattice.get_m_m_neighbors(site_id):
+                neighbor = int(neighbor)
+                if ir_mask[neighbor] and not visited[neighbor]:
+                    visited[neighbor] = True
+                    stack.append(neighbor)
+        clusters.append(component)
+
+    largest_cluster = max(clusters, key=len, default=[])
+    cluster_radius_gyration_nm = 0.0
+    cluster_shape_anisotropy = 0.0
+    if len(largest_cluster) > 1:
+        positions = lattice.positions_nm[
+            np.asarray(largest_cluster, dtype=np.int32)
+        ]
+        centered = positions - positions.mean(axis=0)
+        gyration_tensor = centered.T @ centered / len(positions)
+        eigenvalues = np.maximum(np.linalg.eigvalsh(gyration_tensor), 0.0)
+        eigenvalue_sum = float(eigenvalues.sum())
+        cluster_radius_gyration_nm = math.sqrt(eigenvalue_sum)
+        if eigenvalue_sum > 0.0:
+            mean_eigenvalue = eigenvalue_sum / 3.0
+            cluster_shape_anisotropy = float(
+                1.5
+                * np.square(eigenvalues - mean_eigenvalue).sum()
+                / eigenvalue_sum**2
+            )
+
+    volume_per_ce_nm3 = lattice.lattice_constant_nm**3 / 4.0
+    particle_volume_nm3 = number_ce * volume_per_ce_nm3
+    equivalent_diameter_nm = 2.0 * (
+        3.0 * particle_volume_nm3 / (4.0 * math.pi)
+    ) ** (1.0 / 3.0)
+
+    return {
+        "step": state.step,
+        "KMC_time": state.kmc_time,
+        "number_Ce": number_ce,
+        "number_O": number_o,
+        "number_Ir_ion": number_ir_ion,
+        "number_Ir": number_ir,
+        "attached_Ir_ion": attached_ir_ion,
+        "attached_Ir": attached_ir,
+        "attached_Ir_total": attached_ir_total,
+        "attached_Ir_fraction": attached_ir_total / total_ir if total_ir else 0.0,
+        "unattached_Ir_ion": unattached_ir_ion,
+        "unattached_Ir": unattached_ir,
+        "unattached_Ir_total": unattached_ir_total,
+        "embedded_Ir_total": embedded_ir_total,
+        "Ir_embedding_fraction": (
+            embedded_ir_total / attached_ir_total if attached_ir_total else 0.0
+        ),
+        "mean_Ir_support_contacts": (
+            float(np.mean(support_contacts)) if support_contacts else 0.0
+        ),
+        "Ir_cluster_count": len(clusters),
+        "Ir_nanoparticle_count_ge_3": sum(
+            len(component) >= 3 for component in clusters
+        ),
+        "largest_Ir_cluster_atoms": len(largest_cluster),
+        "mean_Ir_Ir_coordination": (
+            float(np.mean(ir_neighbor_counts)) if ir_neighbor_counts else 0.0
+        ),
+        "largest_Ir_cluster_radius_gyration_nm": cluster_radius_gyration_nm,
+        "largest_Ir_cluster_shape_anisotropy": cluster_shape_anisotropy,
+        "equivalent_diameter_nm": equivalent_diameter_nm,
+        "sonication_event_count": state.event_counts[
+            SonicationEventType.CORROSION.value
+        ],
+        "sonication_removed_atoms": state.sonication_removed_atoms,
+    }
 
 
 class IndexedSet:
@@ -289,58 +409,13 @@ class LocalKMC:
         neighbors = self.lattice.get_ce_o_neighbors(site_id)
         return bool(np.any(self.accessible_empty[neighbors]))
 
-    def _reservoir_saturation_count(self, species: Species) -> float:
-        ce_capacity = max(
-            1.0,
-            self.initial_ce_atoms
-            * self.ceox_parameters.excess_reservoir_saturation_fraction,
-        )
-        return ce_capacity if species == Species.CE else 2.0 * ce_capacity
-
     def _solution_chemical_potential(self, species: Species) -> float:
+        """Return the configured fixed grand-canonical bath potential."""
         if species == Species.CE:
-            baseline = self.ceox_parameters.chemical_potential_ce_ev
-            maximum = self.ceox_parameters.maximum_chemical_potential_ce_ev
-            excess_atoms = max(
-                self.state.solution_excess_ce_atoms,
-                self.state.sonication_removed_ce_atoms,
-            )
-        else:
-            baseline = self.ceox_parameters.chemical_potential_o_ev
-            maximum = self.ceox_parameters.maximum_chemical_potential_o_ev
-            excess_atoms = max(
-                self.state.solution_excess_o_atoms,
-                self.state.sonication_removed_o_atoms,
-            )
-        fraction = min(
-            1.0,
-            excess_atoms / self._reservoir_saturation_count(species),
-        )
-        return baseline + max(0.0, maximum - baseline) * fraction
-
-    def _ce_rate_for_key(self, key: Hashable) -> float:
-        kind, coordination, ir_coordination = key
-        if kind in (EventType.CE_ADSORPTION, EventType.CE_DESORPTION):
-            species = Species.CE
-        else:
-            species = Species.O
-        chemical_potential = self._solution_chemical_potential(species)
-        binding = self._ce_o_binding(coordination, ir_coordination)
-        if kind in (EventType.CE_ADSORPTION, EventType.O_ADSORPTION):
-            delta = -chemical_potential - binding
-            prefactor = self.ceox_parameters.adsorption_prefactor
-        else:
-            delta = binding + chemical_potential
-            prefactor = self.ceox_parameters.desorption_prefactor
-        return transition_rate(delta, prefactor, self.ceox_parameters)
-
-    def _refresh_ce_bucket_rates(self) -> None:
-        total_rate = 0.0
-        for code, key in enumerate(self.ce_buckets.keys):
-            rate = self._ce_rate_for_key(key)
-            self.ce_buckets.rates[code] = rate
-            total_rate += rate * len(self.ce_buckets.members[code])
-        self.ce_buckets.total_rate = total_rate
+            return self.ceox_parameters.chemical_potential_ce_ev
+        if species == Species.O:
+            return self.ceox_parameters.chemical_potential_o_ev
+        raise ValueError(f"no Ce/O solution chemical potential for {species}")
 
     def _ce_event(self, site_id: int) -> tuple[Hashable, float] | None:
         site_type = self.lattice.site_type[site_id]
@@ -574,8 +649,6 @@ class LocalKMC:
     def _apply_site_changes(
         self,
         changes: dict[int, Species],
-        solution_ce_delta: int = 0,
-        solution_o_delta: int = 0,
         solution_ir_delta: int = 0,
     ) -> None:
         changed_sites = set(changes)
@@ -593,29 +666,12 @@ class LocalKMC:
                 )
             else:
                 self.accessible_empty[site_id] = False
-        old_solution_counts = (
-            self.state.solution_excess_ce_atoms,
-            self.state.solution_excess_o_atoms,
-        )
-        self.state.solution_excess_ce_atoms = max(
-            0,
-            self.state.solution_excess_ce_atoms + solution_ce_delta,
-        )
-        self.state.solution_excess_o_atoms = max(
-            0,
-            self.state.solution_excess_o_atoms + solution_o_delta,
-        )
         updated_ir_precursor = (
             self.state.solution_ir_precursor_atoms + solution_ir_delta
         )
         if not 0 <= updated_ir_precursor <= self.initial_ir_precursor_atoms:
             raise RuntimeError("finite Ir precursor inventory would be violated")
         self.state.solution_ir_precursor_atoms = updated_ir_precursor
-        if old_solution_counts != (
-            self.state.solution_excess_ce_atoms,
-            self.state.solution_excess_o_atoms,
-        ):
-            self._refresh_ce_bucket_rates()
         self._after_change(ce_sites, m_sites, surface_sites)
 
     def _sonication_rate(self) -> float:
@@ -673,21 +729,7 @@ class LocalKMC:
             species = Species.EMPTY if kind in (EventType.CE_DESORPTION, EventType.O_DESORPTION) else (
                 Species.CE if kind == EventType.CE_ADSORPTION else Species.O
             )
-            ce_delta = (
-                1 if kind == EventType.CE_DESORPTION
-                else -1 if kind == EventType.CE_ADSORPTION
-                else 0
-            )
-            o_delta = (
-                1 if kind == EventType.O_DESORPTION
-                else -1 if kind == EventType.O_ADSORPTION
-                else 0
-            )
-            self._apply_site_changes(
-                {site_id: species},
-                solution_ce_delta=ce_delta,
-                solution_o_delta=o_delta,
-            )
+            self._apply_site_changes({site_id: species})
             return kind.value
         if family == "ir_exchange":
             kind = key[0]
@@ -739,9 +781,7 @@ class LocalKMC:
             self.state.sonication_removed_o_atoms += removed_o
             self.state.sonication_removed_atoms += len(removed)
             self._apply_site_changes(
-                {int(site_id): Species.EMPTY for site_id in removed},
-                solution_ce_delta=removed_ce,
-                solution_o_delta=removed_o,
+                {int(site_id): Species.EMPTY for site_id in removed}
             )
         return SonicationEventType.CORROSION.value
 
@@ -824,8 +864,6 @@ class LocalKMC:
             - self.state.solution_ir_precursor_atoms
             - solid_ir_atoms
         )
-        row["solution_excess_Ce_atoms"] = self.state.solution_excess_ce_atoms
-        row["solution_excess_O_atoms"] = self.state.solution_excess_o_atoms
         row["effective_chemical_potential_Ce_ev"] = (
             self._solution_chemical_potential(Species.CE)
         )
@@ -883,13 +921,11 @@ class LocalKMC:
             "sonication_removed_atoms": self.state.sonication_removed_atoms,
             "sonication_removed_ce_atoms": self.state.sonication_removed_ce_atoms,
             "sonication_removed_o_atoms": self.state.sonication_removed_o_atoms,
-            "solution_excess_ce_atoms": self.state.solution_excess_ce_atoms,
-            "solution_excess_o_atoms": self.state.solution_excess_o_atoms,
             "solution_ir_precursor_atoms": self.state.solution_ir_precursor_atoms,
             "stopped_reason": self.state.stopped_reason,
         }
         bucket_data = {
-            "model_version": 2,
+            "model_version": 3,
             "ce": {
                 "keys": [
                     [key[0].value, key[1], key[2]]
@@ -1015,12 +1051,6 @@ def load_local_checkpoint(
             sonication_removed_atoms=int(state_data["sonication_removed_atoms"]),
             sonication_removed_ce_atoms=int(state_data["sonication_removed_ce_atoms"]),
             sonication_removed_o_atoms=int(state_data["sonication_removed_o_atoms"]),
-            solution_excess_ce_atoms=int(
-                state_data.get("solution_excess_ce_atoms", 0)
-            ),
-            solution_excess_o_atoms=int(
-                state_data.get("solution_excess_o_atoms", 0)
-            ),
             solution_ir_precursor_atoms=(
                 int(state_data["solution_ir_precursor_atoms"])
                 if "solution_ir_precursor_atoms" in state_data
@@ -1045,11 +1075,10 @@ def load_local_checkpoint(
         )
         if "bucket_state" in checkpoint:
             bucket_state = json.loads(str(checkpoint["bucket_state"]))
-            # Ce/O bucket keys gained explicit Ir-O coordination.  Older
-            # checkpoints retain valid occupations/state, but their cached
-            # rates cannot be reused under the corrected Hamiltonian.
+            # Older checkpoints retain valid occupations/state, but cached
+            # Ce/O rates may use the former dynamic chemical potential.
             if (
-                bucket_state.get("model_version") == 2
+                bucket_state.get("model_version") == 3
                 and all(len(key) == 3 for key in bucket_state["ce"]["keys"])
             ):
                 engine.restore_bucket_state(bucket_state)

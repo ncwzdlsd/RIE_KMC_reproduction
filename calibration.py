@@ -8,7 +8,11 @@ import numpy as np
 
 from kinetic_parameters import KineticParameterSet
 from local_kmc import LocalKMC
-from paper_parameters import PAPER_TARGET_TIMES_MIN
+from paper_parameters import (
+    PAPER_CHEMICAL_POTENTIAL_CE_EV,
+    PAPER_CHEMICAL_POTENTIAL_O_EV,
+    PAPER_TARGET_TIMES_MIN,
+)
 from run_sonication_comparison import build_initial_lattice
 
 
@@ -144,9 +148,13 @@ def calibrate(
 ) -> tuple[KineticParameterSet, list[dict], dict]:
     if config.iterations <= 0 or config.replicates <= 0:
         raise ValueError("iterations and replicates must be positive")
+    initial = replace(
+        initial,
+        chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
+        chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
+    )
     rng = np.random.default_rng(config.random_seed)
     best_scales = np.asarray([1.0, 1.0], dtype=float)
-    best_mu = initial.chemical_potential_ce_ev
     best_parameters = initial
     best_objective, best_summary = calibration_objective(best_parameters, config)
     history = [
@@ -155,7 +163,7 @@ def calibrate(
             "objective": best_objective,
             "ce_scale": 1.0,
             "sonication_scale": 1.0,
-            "chemical_potential_ce_o_ev": best_mu,
+            "chemical_potential_ce_o_ev": initial.chemical_potential_ce_ev,
             "accepted": True,
         }
     ]
@@ -163,19 +171,14 @@ def calibrate(
     for iteration in range(1, config.iterations + 1):
         cooling = max(0.15, 1.0 - iteration / (config.iterations + 1.0))
         proposed_scales = best_scales * np.exp(rng.normal(0.0, 0.9 * cooling, size=2))
-        proposed_mu = float(
-            np.clip(best_mu + rng.normal(0.0, 0.04 * cooling), -0.80, -0.50)
-        )
         candidate = initial.scaled(
             ce_scale=float(proposed_scales[0]),
             sonication_scale=float(proposed_scales[1]),
-            chemical_potential_ce_o_ev=proposed_mu,
         )
         objective, summary = calibration_objective(candidate, config)
         accepted = objective < best_objective
         if accepted:
             best_scales = proposed_scales
-            best_mu = proposed_mu
             best_parameters = candidate
             best_objective = objective
             best_summary = summary
@@ -185,7 +188,7 @@ def calibrate(
                 "objective": objective,
                 "ce_scale": float(proposed_scales[0]),
                 "sonication_scale": float(proposed_scales[1]),
-                "chemical_potential_ce_o_ev": proposed_mu,
+                "chemical_potential_ce_o_ev": initial.chemical_potential_ce_ev,
                 "accepted": accepted,
             }
         )
@@ -195,8 +198,9 @@ def calibrate(
         calibrated=best_objective <= config.acceptance_objective,
         calibration_objective=best_objective,
         calibration_scope=(
-            "Ce/O exchange time scale, shared Ce/O chemical potential, and "
-            "per-interface-site sonication propensity fitted to Tables S3/S5; "
+            "Ce/O exchange time scale and per-interface-site sonication "
+            "propensity fitted to Tables S3/S5 at fixed Ce/O chemical "
+            "potential; "
             "Ir rates remain "
             "explicit initial estimates"
         ),

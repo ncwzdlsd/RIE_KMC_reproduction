@@ -1,10 +1,10 @@
 """Local-update KMC engine for the Ce/O-only S34 reproduction.
 
-The general engine rebuilds the complete event catalog after every event.  At
-the paper scale (roughly 0.6 million sites and 5 million events), that approach
-is prohibitively expensive.  Here every active site belongs to one rate bucket
-defined by site type, occupation, and local Ce-O coordination.  An event only
-requires updating the changed site and its nearest Ce-O neighbors.
+This specialized engine omits Ir and sonication bookkeeping so the paper-scale
+Ce/O-only case (roughly 0.6 million sites and 5 million events) remains compact.
+Every active site belongs to one rate bucket defined by site type, occupation,
+and local Ce-O coordination.  An event only updates the changed site and its
+nearest Ce-O neighbors.
 
 External-solution connectivity is calculated exactly at initialization.  It is
 then maintained locally: adsorption removes one accessible empty site and
