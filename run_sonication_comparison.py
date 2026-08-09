@@ -106,7 +106,7 @@ def write_paired_frame(
             "Properties=species:S:1:pos:R:3:surface:I:1:ir_state:I:1:"
             "embedded:I:1:support_contacts:I:1:condition:I:1 "
             f"time_min={sample_time_min:g} condition=0:no_sonication "
-            "condition=1:sonication\n"
+            "condition=1:sonication ir_output=support_connected_only\n"
         )
         for record in paired_records:
             name, x, y, z, surface, ir_state, embedded, contacts, condition = record
@@ -161,6 +161,9 @@ def write_metrics(
         "attached_Ir",
         "attached_Ir_total",
         "attached_Ir_fraction",
+        "unattached_Ir_ion",
+        "unattached_Ir",
+        "unattached_Ir_total",
         "embedded_Ir_total",
         "Ir_embedding_fraction",
         "mean_Ir_support_contacts",
@@ -354,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "time_unit": "s",
         "environment_model": {
             "solution": "implicit_well_mixed_solution",
-            "lattice": "solid_CeOx_and_supported_Ir_only",
+            "lattice": "CeOx_support_plus_explicit_box_transport_Ir_on_M_sites",
             "ce_o_exchange": "solution_exposed_CeOx_growth_sites",
             "o_ir_interface": "O adsorption/desorption includes adjacent ionic and metallic Ir binding",
             "ce_o_inventory": "sonication/desorption add excess atoms; adsorption consumes the explicit excess ledger",
@@ -362,12 +365,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             "sonication_event_catalog": "one_candidate_KMC_event_per_current_nanoparticle_solution_interface_site",
             "sonication_event_selection": "n_fold_way_total_propensity_then_uniform_interface_center",
             "sonication_rate_parameter_unit": "s^-1_per_interface_site",
-            "ir_exchange": "solution_exposed_support_or_anchored_Ir_sites",
+            "ir_exchange": "adsorption_and_desorption_only_at_box_edge_M_sites",
             "ir_inventory": "finite_conserved_precursor_reservoir",
             "ir_adsorption_activity": "remaining_precursor_fraction",
             "initial_ir_precursor_atoms": control_engine.initial_ir_precursor_atoms,
+            "initial_ce_atoms": control_engine.initial_ce_atoms,
+            "ir_to_ce_atom_ratio": parameters.precursor_ir_to_ce_atom_ratio,
             "ir_capacity_basis": "Table_S9_RIE_Ir_to_Ce_atom_ratio_scaled_by_initial_Ce",
-            "ir_diffusion": "support_or_anchored_Ir_interface_only",
+            "ir_diffusion": "nearest_neighbor_hops_over_all_solution_accessible_empty_M_sites",
+            "ir_reduction": "only_at_support_or_existing_metallic_Ir_attachment_sites",
+            "xyz_ir_visibility": "only_Ir_clusters_connected_to_CeOx; unattached_transport_Ir_remains_in_KMC_state",
             "ir_morphology": "diffusion_dominated_ionic_relaxation_before_reduction",
             "metallic_ir_surface_diffusion": False,
             "bulk_ir_reduction": False,
@@ -412,6 +419,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{control_engine.initial_ir_precursor_atoms} atoms; remaining "
         f"no-sonication={control_engine.state.solution_ir_precursor_atoms}, "
         f"sonication={sonicated_engine.state.solution_ir_precursor_atoms}"
+    )
+    print(
+        "Final supported/unattached Ir: "
+        f"no-sonication={control_metrics[-1]['attached_Ir_total']}/"
+        f"{control_metrics[-1]['unattached_Ir_total']}, "
+        f"sonication={sonicated_metrics[-1]['attached_Ir_total']}/"
+        f"{sonicated_metrics[-1]['unattached_Ir_total']}"
     )
 
 

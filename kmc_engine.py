@@ -94,18 +94,34 @@ def calculate_current(lattice:Lattice,state:KMCState):
     surface_o=int(np.count_nonzero(external_surface&(lattice.occupation==Species.O)))
     surface_ir_ion=int(np.count_nonzero(external_surface&(lattice.occupation==Species.IR_ION)))
     surface_ir=int(np.count_nonzero(external_surface&(lattice.occupation==Species.IR)))
-    embedded_ir_ion=number_ir_ion-surface_ir_ion
-    embedded_ir=number_ir-surface_ir
     total_ir=number_ir_ion+number_ir
-    embedded_ir_total=embedded_ir_ion+embedded_ir
-    ir_site_ids=np.flatnonzero(
-        (lattice.occupation==Species.IR_ION)
-        |(lattice.occupation==Species.IR)
-    )
+    ir_mask=(lattice.occupation==Species.IR_ION)|(lattice.occupation==Species.IR)
     supported_ir=find_supported_ir_sites(lattice)
     attached_ir_ion=int(np.count_nonzero(supported_ir&(lattice.occupation==Species.IR_ION)))
     attached_ir=int(np.count_nonzero(supported_ir&(lattice.occupation==Species.IR)))
     attached_ir_total=attached_ir_ion+attached_ir
+    unattached_ir_ion=number_ir_ion-attached_ir_ion
+    unattached_ir=number_ir-attached_ir
+    unattached_ir_total=unattached_ir_ion+unattached_ir
+    embedded_ir_ion=int(
+        np.count_nonzero(
+            supported_ir
+            &(lattice.occupation==Species.IR_ION)
+            &~external_surface
+        )
+    )
+    embedded_ir=int(
+        np.count_nonzero(
+            supported_ir
+            &(lattice.occupation==Species.IR)
+            &~external_surface
+        )
+    )
+    embedded_ir_total=embedded_ir_ion+embedded_ir
+    # Morphology statistics describe exactly the supported Ir that is written
+    # to the public XYZ files.  Box-transport ions are retained in the KMC
+    # state and inventory, but do not masquerade as catalyst nanoparticles.
+    ir_site_ids=np.flatnonzero(ir_mask&supported_ir)
     ir_support_contact_counts=[]
     for site_id in ir_site_ids:
         site_id=int(site_id)
@@ -118,7 +134,6 @@ def calculate_current(lattice:Lattice,state:KMCState):
         np.count_nonzero(np.asarray(ir_support_contact_counts)>=8)
     )
 
-    ir_mask=(lattice.occupation==Species.IR_ION)|(lattice.occupation==Species.IR)
     ir_neighbor_counts=[]
     for site_id in ir_site_ids:
         neighbors=lattice.get_m_m_neighbors(int(site_id))
@@ -177,6 +192,9 @@ def calculate_current(lattice:Lattice,state:KMCState):
         "attached_Ir":attached_ir,
         "attached_Ir_total":attached_ir_total,
         "attached_Ir_fraction":attached_ir_total/total_ir if total_ir else 0.0,
+        "unattached_Ir_ion":unattached_ir_ion,
+        "unattached_Ir":unattached_ir,
+        "unattached_Ir_total":unattached_ir_total,
         "number_total":number_tot,
         "surface_Ce":surface_ce,
         "surface_O":surface_o,
@@ -185,10 +203,10 @@ def calculate_current(lattice:Lattice,state:KMCState):
         "embedded_Ir_ion":embedded_ir_ion,
         "embedded_Ir":embedded_ir,
         "embedded_Ir_total":embedded_ir_total,
-        "Ir_embedding_fraction":embedded_ir_total/total_ir if total_ir else 0.0,
+        "Ir_embedding_fraction":embedded_ir_total/attached_ir_total if attached_ir_total else 0.0,
         "mean_Ir_support_contacts":mean_ir_support_contacts,
         "highly_covered_Ir_count":highly_covered_ir_count,
-        "highly_covered_Ir_fraction":highly_covered_ir_count/total_ir if total_ir else 0.0,
+        "highly_covered_Ir_fraction":highly_covered_ir_count/attached_ir_total if attached_ir_total else 0.0,
         "Ir_cluster_count":len(cluster_site_ids),
         "Ir_nanoparticle_count_ge_3":sum(
             len(component)>=3 for component in cluster_site_ids

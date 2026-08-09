@@ -36,10 +36,15 @@ class KineticParameterSet:
 
     ir_adsorption_prefactor_s: float = 1.0e-4
     ir_desorption_prefactor_s: float = 1.0e-5
-    # Morphology-informed initial estimates: ions must explore the supported
-    # interface before reduction freezes them into the metallic cluster.
-    ir_diffusion_prefactor_s: float = 2.0e-2
-    ir_reduction_prefactor_s: float = 5.0e-4
+    # Morphology-informed initial estimates: ions must cross the empty M-site
+    # network and explore the supported interface before reduction freezes
+    # them into a metallic cluster.
+    # 2.0 s^-1 per available hop yields a few support arrivals by 5 min in the
+    # 20 nm / 5 nm paper geometry without replacing explicit nearest-neighbor
+    # transport by direct deposition.  Reduction remains much slower so ions
+    # can explore the interface.  Both unpublished values still need fitting.
+    ir_diffusion_prefactor_s: float = 2.0
+    ir_reduction_prefactor_s: float = 5.0e-3
     ir_oxidation_prefactor_s: float = 1.0e-6
     ir_adsorption_barrier_ev: float = 0.0
     ir_desorption_barrier_ev: float = 0.0

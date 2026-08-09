@@ -13,13 +13,16 @@ import numpy as np
 
 from ceox_events import CeOxParameters, EventType, transition_rate
 from constants import SiteType, Species
-from generation import find_accessible_empty_sites, find_external_surface, write_xyz
+from generation import (
+    find_accessible_empty_sites,
+    find_external_surface,
+    find_supported_ir_sites,
+    write_xyz,
+)
 from ir_events import (
     IrEventType,
     IrParameters,
     activated_rate,
-    is_ir_attachment_site,
-    is_solution_exposed,
     is_supported_reduction_site,
     local_ir_binding_energy,
 )
@@ -374,23 +377,19 @@ class LocalKMC:
         occupation = self.lattice.occupation[site_id]
         if occupation not in (Species.EMPTY, Species.IR_ION):
             return None
+        if not self.lattice.reservoir_boundary[site_id]:
+            return None
         binding, ir_count, o_count = local_ir_binding_energy(
             self.lattice, site_id, self.ir_parameters
         )
         if occupation == Species.EMPTY:
             if not self.accessible_empty[site_id]:
                 return None
-            if not is_ir_attachment_site(self.lattice, site_id):
-                return None
             kind = IrEventType.IR_ION_ADSORPTION
             delta = -self.ir_parameters.chemical_potential_ir_ion_ev - binding
             prefactor = self.ir_parameters.adsorption_prefactor
             barrier = self.ir_parameters.adsorption_barrier_ev
         else:
-            if not is_solution_exposed(
-                self.lattice, site_id, self.accessible_empty
-            ):
-                return None
             kind = IrEventType.IR_ION_DESORPTION
             delta = self.ir_parameters.chemical_potential_ir_ion_ev + binding
             prefactor = self.ir_parameters.desorption_prefactor
@@ -468,8 +467,6 @@ class LocalKMC:
         if self.lattice.occupation[target] != Species.EMPTY:
             return None
         if not self.accessible_empty[target]:
-            return None
-        if not is_ir_attachment_site(self.lattice, target):
             return None
         initial_binding, initial_ir, initial_o = local_ir_binding_energy(
             self.lattice, source, self.ir_parameters
@@ -848,6 +845,19 @@ class LocalKMC:
         supported_ir_only: bool = False,
     ) -> None:
         sample_time = self.state.kmc_time if sample_time is None else sample_time
+        visibility_comment = ""
+        if supported_ir_only:
+            ir_mask = (
+                (self.lattice.occupation == Species.IR_ION)
+                | (self.lattice.occupation == Species.IR)
+            )
+            supported_ir = find_supported_ir_sites(self.lattice)
+            total_ir = int(np.count_nonzero(ir_mask))
+            visible_ir = int(np.count_nonzero(ir_mask & supported_ir))
+            visibility_comment = (
+                "ir_output=support_connected_only "
+                f"visible_Ir={visible_ir} hidden_unattached_Ir={total_ir-visible_ir} "
+            )
         write_xyz(
             filename,
             self.lattice,
@@ -859,6 +869,7 @@ class LocalKMC:
                 f"mu_O={self._solution_chemical_potential(Species.O):.6f} "
                 f"Ir_precursor={self.state.solution_ir_precursor_atoms}/"
                 f"{self.initial_ir_precursor_atoms} "
+                f"{visibility_comment}"
                 f"k_sonication_total={self._sonication_rate():.6e}"
             ),
         )
@@ -878,6 +889,7 @@ class LocalKMC:
             "stopped_reason": self.state.stopped_reason,
         }
         bucket_data = {
+            "model_version": 2,
             "ce": {
                 "keys": [
                     [key[0].value, key[1], key[2]]
@@ -1036,6 +1048,9 @@ def load_local_checkpoint(
             # Ce/O bucket keys gained explicit Ir-O coordination.  Older
             # checkpoints retain valid occupations/state, but their cached
             # rates cannot be reused under the corrected Hamiltonian.
-            if all(len(key) == 3 for key in bucket_state["ce"]["keys"]):
+            if (
+                bucket_state.get("model_version") == 2
+                and all(len(key) == 3 for key in bucket_state["ce"]["keys"])
+            ):
                 engine.restore_bucket_state(bucket_state)
         return engine

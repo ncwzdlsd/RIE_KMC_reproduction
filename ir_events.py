@@ -190,7 +190,11 @@ def build_ir_ion_adsorption_event(
         return None
     if accessible_empty is None:
         accessible_empty = find_accessible_empty_sites(lattice)
-    if not accessible_empty[site_id] or not is_ir_attachment_site(lattice, site_id):
+    # The supplementary KMC model introduces Ir from the liquid at M sites
+    # along the simulation-box edge.  Attachment to the support is a later
+    # consequence of explicit nearest-neighbor diffusion, not an adsorption
+    # prerequisite.
+    if not lattice.reservoir_boundary[site_id] or not accessible_empty[site_id]:
         return None
 
     binding_energy_ev, ir_neighbors, o_neighbors = local_ir_binding_energy(
@@ -226,9 +230,9 @@ def build_ir_ion_desorption_event(
         return None
     if lattice.occupation[site_id] != Species.IR_ION:
         return None
-    if accessible_empty is None:
-        accessible_empty = find_accessible_empty_sites(lattice)
-    if not is_solution_exposed(lattice, site_id, accessible_empty):
+    # Exchange with the implicit, well-mixed precursor reservoir occurs only
+    # at the same box-edge sites used for adsorption.
+    if not lattice.reservoir_boundary[site_id]:
         return None
 
     binding_energy_ev, ir_neighbors, o_neighbors = local_ir_binding_energy(
@@ -273,9 +277,6 @@ def build_ir_ion_diffusion_event(
         accessible_empty = find_accessible_empty_sites(lattice)
     if not accessible_empty[target_site_id]:
         return None
-    if not is_ir_attachment_site(lattice, target_site_id):
-        return None
-
     initial_binding_ev, _, _ = local_ir_binding_energy(
         lattice, source_site_id, parameters
     )
