@@ -26,7 +26,12 @@ import numpy as np
 
 from ceox_events import CeOxParameters, EventType, transition_rate
 from constants import SiteType, Species
-from generation import find_accessible_empty_sites, find_external_surface, write_xyz
+from generation import (
+    find_accessible_empty_sites,
+    find_external_surface,
+    is_external_surface,
+    write_xyz,
+)
 from lattice_build import Lattice
 
 
@@ -133,10 +138,6 @@ class FastCeOxKMC:
             return int(np.count_nonzero(self.lattice.occupation[neighbors] == Species.O))
         return int(np.count_nonzero(self.lattice.occupation[neighbors] == Species.CE))
 
-    def _is_external_surface(self, site_id: int) -> bool:
-        neighbors = self.lattice.get_ce_o_neighbors(site_id)
-        return bool(np.any(self.accessible_empty[neighbors]))
-
     def _site_key(self, site_id: int) -> tuple[EventType, int] | None:
         occupation = self.lattice.occupation[site_id]
         site_type = self.lattice.site_type[site_id]
@@ -152,7 +153,7 @@ class FastCeOxKMC:
                 else EventType.O_ADSORPTION
             )
             return kind, coordination
-        if not self._is_external_surface(site_id):
+        if not is_external_surface(self.lattice, self.accessible_empty, site_id):
             return None
         if occupation == Species.CE:
             return EventType.CE_DESORPTION, coordination

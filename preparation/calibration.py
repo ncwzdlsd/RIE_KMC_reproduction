@@ -1,4 +1,4 @@
-"""Calibration of physical KMC rates against supplementary Tables S3 and S5."""
+"""One-time calibration of KMC rates against supplementary Tables S3 and S5."""
 
 from __future__ import annotations
 
@@ -6,14 +6,15 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from generation import build_initial_lattice
 from kinetic_parameters import KineticParameterSet
 from local_kmc import LocalKMC
 from paper_parameters import (
+    CE_ATOMIC_MASS,
     PAPER_CHEMICAL_POTENTIAL_CE_EV,
     PAPER_CHEMICAL_POTENTIAL_O_EV,
     PAPER_TARGET_TIMES_MIN,
 )
-from run_sonication_comparison import build_initial_lattice
 
 
 # Particle diameters from supplementary Table S3, normalized by 7.9 nm so a
@@ -44,7 +45,6 @@ DISSOLVED_CE_UG_ML = {
 # Table S5 uses 50 mg CeOx in 80 mL.  This converts a modeled net Ce fraction
 # to the corresponding maximum-batch concentration under the single-particle
 # representative approximation.
-CE_ATOMIC_MASS = 140.116
 O_ATOMIC_MASS = 15.999
 CEO2_CE_MASS_FRACTION = CE_ATOMIC_MASS / (CE_ATOMIC_MASS + 2.0 * O_ATOMIC_MASS)
 MAX_CE_UG_ML = 50_000.0 * CEO2_CE_MASS_FRACTION / 80.0

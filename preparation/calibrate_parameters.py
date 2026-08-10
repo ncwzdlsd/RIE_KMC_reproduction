@@ -3,27 +3,48 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import asdict
 import json
 from pathlib import Path
+import sys
 
-from calibration import CalibrationConfig, calibrate
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
+    # Allow direct execution with: py -3 preparation/calibrate_parameters.py
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from preparation.calibration import CalibrationConfig, calibrate
 from kinetic_parameters import KineticParameterSet
 
 
-def main() -> None:
+DEFAULT_OUTPUT = PROJECT_ROOT / "calibrated_parameters.json"
+DEFAULT_ITERATIONS = 40
+DEFAULT_REPLICATES = 5
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--initial-parameters", type=Path)
-    parser.add_argument("--output", type=Path, default=Path("calibrated_parameters.json"))
-    parser.add_argument("--iterations", type=int, default=12)
-    parser.add_argument("--replicates", type=int, default=2)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
+    parser.add_argument("--replicates", type=int, default=DEFAULT_REPLICATES)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--box-nm", type=float, default=4.8)
     parser.add_argument("--particle-diameter-nm", type=float, default=4.0)
     parser.add_argument("--roughness-fraction", type=float, default=0.05)
     parser.add_argument("--maximum-events-per-interval", type=int, default=500_000)
     parser.add_argument("--acceptance-objective", type=float, default=4.0)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    print("Starting one-time KMC parameter preparation.", flush=True)
+    print(
+        f"Calibration settings: iterations={args.iterations}, "
+        f"replicates={args.replicates}, seed={args.seed}",
+        flush=True,
+    )
+    print(f"Parameter output: {args.output.resolve()}", flush=True)
 
     initial = (
         KineticParameterSet.read(args.initial_parameters)
@@ -66,7 +87,12 @@ def main() -> None:
     if not calibrated.calibrated:
         print(
             "Calibration did not meet the acceptance threshold; the output is "
-            "marked uncalibrated and formal time runs will reject it."
+            "marked uncalibrated and comparison runs will label it diagnostic."
+        )
+    else:
+        print(
+            "Preparation complete. Run run_sonication_comparison.py to start "
+            "the standard 180 min comparison."
         )
 
 

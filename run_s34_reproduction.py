@@ -13,19 +13,14 @@ command-line assumption and is recorded in run_metadata.json.
 from __future__ import annotations
 
 import argparse
-from builtins import str
 import csv
 from dataclasses import asdict
 import json
-import math
 from pathlib import Path
-
-import numpy as np
 
 from ceox_events import CeOxParameters
 from fast_ceox_kmc import FastCeOxKMC, load_checkpoint
-from generation import initialize_sphere, roughen_surface
-from lattice_build import build_fluorite_lattice
+from generation import build_initial_lattice
 from paper_parameters import (
     DFT_CE_O_BINDING_ENERGY_EV,
     PAPER_BOX_NM,
@@ -36,32 +31,11 @@ from paper_parameters import (
 )
 
 
-PAPER_CHEMICAL_POTENTIAL_EV = PAPER_CHEMICAL_POTENTIAL_CE_EV
-PAPER_CE_O_BINDING_EV = DFT_CE_O_BINDING_ENERGY_EV
-
-
 def parse_steps(value: str) -> tuple[int, ...]:
     steps = tuple(sorted({int(item.strip()) for item in value.split(",") if item.strip()}))
     if any(step < 0 for step in steps):
         raise argparse.ArgumentTypeError("snapshot steps must be non-negative")
     return steps
-
-
-def build_initial_lattice(
-    random_seed: int,
-    roughness_fraction: float,
-):
-    ncells = math.ceil(PAPER_BOX_NM / 0.541)
-    lattice = build_fluorite_lattice(ncells=ncells)
-    rng = np.random.default_rng(random_seed)
-    initialize_sphere(
-        lattice,
-        diameter_nm=PAPER_PARTICLE_DIAMETER_NM,
-        oxygen_x=2.0,
-        rng=rng,
-    )
-    roughen_surface(lattice, fraction=roughness_fraction, rng=rng)
-    return lattice
 
 
 def newest_checkpoint(condition_directory: Path, target_step: int) -> Path | None:
@@ -106,6 +80,8 @@ def run_particle(args, parameters: CeOxParameters):
     condition_directory.mkdir(parents=True, exist_ok=True)
     lattice = build_initial_lattice(
         random_seed=args.seed,
+        box_nm=PAPER_BOX_NM,
+        particle_diameter_nm=PAPER_PARTICLE_DIAMETER_NM,
         roughness_fraction=args.roughness_fraction,
     )
     checkpoint = newest_checkpoint(condition_directory, args.steps) if args.resume else None
@@ -222,9 +198,9 @@ def main():
 
     parameters = CeOxParameters(
         temperature_k=PAPER_TEMPERATURE_K,
-        ce_o_binding_energy_ev=PAPER_CE_O_BINDING_EV,
-        chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_EV,
-        chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_EV,
+        ce_o_binding_energy_ev=DFT_CE_O_BINDING_ENERGY_EV,
+        chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
+        chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
         adsorption_prefactor=args.adsorption_prefactor,
         desorption_prefactor=args.desorption_prefactor,
         exchange_barrier_ev=0.0,
@@ -236,9 +212,9 @@ def main():
             "box_nm": [20.0, 20.0, 20.0],
             "particle_diameter_nm": PAPER_PARTICLE_DIAMETER_NM,
             "temperature_k": PAPER_TEMPERATURE_K,
-            "chemical_potential_ce_ev": PAPER_CHEMICAL_POTENTIAL_EV,
-            "chemical_potential_o_ev": PAPER_CHEMICAL_POTENTIAL_EV,
-            "ce_o_binding_energy_ev": PAPER_CE_O_BINDING_EV,
+            "chemical_potential_ce_ev": PAPER_CHEMICAL_POTENTIAL_CE_EV,
+            "chemical_potential_o_ev": PAPER_CHEMICAL_POTENTIAL_CE_EV,
+            "ce_o_binding_energy_ev": DFT_CE_O_BINDING_ENERGY_EV,
             "snapshot_steps": list(PAPER_SNAPSHOT_STEPS),
         },
         "explicit_assumptions_not_reported_by_paper": {

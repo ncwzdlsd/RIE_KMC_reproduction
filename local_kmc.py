@@ -17,6 +17,7 @@ from generation import (
     find_accessible_empty_sites,
     find_external_surface,
     find_supported_ir_sites,
+    is_external_surface,
     ir_support_contact_count,
     write_xyz,
 )
@@ -405,10 +406,6 @@ class LocalKMC:
             + ir_coordination * self.ceox_parameters.ir_o_binding_energy_ev
         )
 
-    def _is_external_surface(self, site_id: int) -> bool:
-        neighbors = self.lattice.get_ce_o_neighbors(site_id)
-        return bool(np.any(self.accessible_empty[neighbors]))
-
     def _solution_chemical_potential(self, species: Species) -> float:
         """Return the configured fixed grand-canonical bath potential."""
         if species == Species.CE:
@@ -433,7 +430,7 @@ class LocalKMC:
             delta = -chemical_potential - binding
             rate = transition_rate(delta, self.ceox_parameters.adsorption_prefactor, self.ceox_parameters)
             return (kind, coordination, ir_coordination), rate
-        if not self._is_external_surface(site_id):
+        if not is_external_surface(self.lattice, self.accessible_empty, site_id):
             return None
         if occupation == Species.CE:
             kind = EventType.CE_DESORPTION
@@ -592,7 +589,7 @@ class LocalKMC:
     def _refresh_surface(self, site_id: int) -> None:
         self.surface_support.discard(site_id)
         if self.lattice.occupation[site_id] in (Species.CE, Species.O):
-            if self._is_external_surface(site_id):
+            if is_external_surface(self.lattice, self.accessible_empty, site_id):
                 self.surface_support.add(site_id)
 
     def _build_all_events(self) -> None:

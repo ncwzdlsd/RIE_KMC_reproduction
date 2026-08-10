@@ -3,7 +3,26 @@ from pathlib import Path
 import numpy as np
 
 from constants import SiteType, Species
-from lattice_build import Lattice
+from lattice_build import Lattice, build_fluorite_lattice
+
+
+def build_initial_lattice(
+    random_seed: int,
+    box_nm: float,
+    particle_diameter_nm: float,
+    roughness_fraction: float,
+) -> Lattice:
+    """Build the shared rough spherical CeO2 starting configuration."""
+    rng = np.random.default_rng(random_seed)
+    lattice = build_fluorite_lattice(ncells=int(np.ceil(box_nm / 0.541)))
+    initialize_sphere(
+        lattice,
+        diameter_nm=particle_diameter_nm,
+        oxygen_x=2.0,
+        rng=rng,
+    )
+    roughen_surface(lattice, fraction=roughness_fraction, rng=rng)
+    return lattice
 
 def initialize_sphere(lattice:Lattice,diameter_nm:float=5.0,oxygen_x:float=2.0,rng:np.random.Generator=None):
     if rng is None:
@@ -70,6 +89,16 @@ def find_external_surface(lattice:Lattice, accessible_empty:np.ndarray | None=No
         if(np.any(accessible_empty[neighbor_ids])):
             surface[site_id]=True
     return surface
+
+
+def is_external_surface(
+    lattice: Lattice,
+    accessible_empty: np.ndarray,
+    site_id: int,
+) -> bool:
+    """Return whether a site touches the externally accessible solution."""
+    neighbors = lattice.get_ce_o_neighbors(site_id)
+    return bool(np.any(accessible_empty[neighbors]))
 
 def roughen_surface(lattice:Lattice,fraction:float=0.05,rng:np.random.Generator=None):
     if rng is None:

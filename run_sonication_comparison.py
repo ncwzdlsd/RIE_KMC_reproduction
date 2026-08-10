@@ -1,4 +1,4 @@
-"""Time-resolved paired KMC simulation with and without sonication."""
+"""Run the standard 0-180 min KMC comparison with and without sonication."""
 
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from generation import initialize_sphere, roughen_surface
+from generation import build_initial_lattice
 from kinetic_parameters import KineticParameterSet
-from lattice_build import build_fluorite_lattice
 from local_kmc import LocalKMC
 from paper_parameters import (
     PAPER_CHEMICAL_POTENTIAL_CE_EV,
@@ -27,6 +26,9 @@ from paper_parameters import (
 
 
 SEPARATION_NM = 8.0
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_PARAMETER_FILE = PROJECT_ROOT / "calibrated_parameters.json"
+DEFAULT_OUTPUT_HINT = PROJECT_ROOT / "kmc_output" / "comparison_180min"
 
 
 def allocate_run_directory(output_hint: Path | None) -> Path:
@@ -62,24 +64,6 @@ def parse_times(value: str) -> tuple[float, ...]:
     if times[0] != 0.0:
         raise argparse.ArgumentTypeError("the first target time must be 0")
     return times
-
-
-def build_initial_lattice(
-    random_seed: int,
-    box_nm: float,
-    particle_diameter_nm: float,
-    roughness_fraction: float,
-):
-    rng = np.random.default_rng(random_seed)
-    lattice = build_fluorite_lattice(ncells=math.ceil(box_nm / 0.541))
-    initialize_sphere(
-        lattice,
-        diameter_nm=particle_diameter_nm,
-        oxygen_x=2.0,
-        rng=rng,
-    )
-    roughen_surface(lattice, fraction=roughness_fraction, rng=rng)
-    return lattice
 
 
 def read_snapshot_records(filename: Path) -> list[tuple]:
@@ -270,23 +254,32 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=PAPER_TARGET_TIMES_MIN,
         help="Increasing comma-separated times; default: 0,5,30,60,120,180.",
     )
-    parser.add_argument("--parameter-file", type=Path)
     parser.add_argument(
-        "--allow-uncalibrated",
+        "--parameter-file",
+        type=Path,
+        help=(
+            "Kinetic parameter JSON. If omitted, calibrated_parameters.json "
+            "beside this script is loaded when present; otherwise built-in "
+            "estimates are used."
+        ),
+    )
+    parser.add_argument(
+        "--require-calibrated",
         action="store_true",
-        help="Allow built-in initial guesses or an uncalibrated parameter file.",
+        help="Stop instead of running when the selected parameters are uncalibrated.",
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
         "--output",
         type=Path,
+        default=DEFAULT_OUTPUT_HINT,
         help=(
             "Output naming hint. A timestamp is always appended so an "
             "existing run is never overwritten."
         ),
     )
-    parser.add_argument("--box-nm", type=float, default=4.8)
-    parser.add_argument("--particle-diameter-nm", type=float, default=4.0)
+    parser.add_argument("--box-nm", type=float, default=20.0)
+    parser.add_argument("--particle-diameter-nm", type=float, default=5.0)
     parser.add_argument("--roughness-fraction", type=float, default=0.05)
     parser.add_argument(
         "--ir-precursor-atoms",
@@ -312,11 +305,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.ir_precursor_atoms is not None and args.ir_precursor_atoms <= 0:
         parser.error("--ir-precursor-atoms must be positive")
 
+    selected_parameter_file = args.parameter_file
+    if selected_parameter_file is None and DEFAULT_PARAMETER_FILE.exists():
+        selected_parameter_file = DEFAULT_PARAMETER_FILE
     parameters = (
-        KineticParameterSet.read(args.parameter_file)
-        if args.parameter_file is not None
+        KineticParameterSet.read(selected_parameter_file)
+        if selected_parameter_file is not None
         else KineticParameterSet()
     )
+    args.parameter_file = selected_parameter_file
     # The formal comparison is the fixed-high-chemical-potential case used in
     # supplementary Figs. S31/S34.  A legacy parameter file may contain the
     # former -0.69 -> -0.60 feedback settings, so force the selected bath here.
@@ -325,10 +322,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
         chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
     )
-    if not parameters.calibrated and not args.allow_uncalibrated:
+    if not parameters.calibrated and args.require_calibrated:
         parser.error(
-            "physical-time simulation requires calibrated parameters; run "
-            "calibrate_parameters.py or pass --allow-uncalibrated for diagnostics"
+            "the selected kinetic parameters are not calibrated"
+        )
+    if parameters.calibrated:
+        print(f"Using calibrated parameters from {selected_parameter_file}", flush=True)
+    else:
+        source = selected_parameter_file or "built-in initial estimates"
+        print(
+            f"WARNING: using {source}; results are diagnostic because the "
+            "kinetic parameters are not calibrated.",
+            flush=True,
         )
 
     initial_lattice = build_initial_lattice(
