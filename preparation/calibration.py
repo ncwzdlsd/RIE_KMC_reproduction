@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from constants import Species
 from generation import build_initial_lattice
 from kinetic_parameters import KineticParameterSet
 from local_kmc import LocalKMC
@@ -80,6 +81,13 @@ def simulate_metrics(
         parameters.ir_parameters(),
         sonication_parameters=(parameters.sonication_parameters() if sonication else None),
         random_seed=seed,
+        # This preparation fits Ce/O exchange and sonication only.  Keep its
+        # historical target-scale Ir inventory so the new precursor-retention
+        # assumption does not silently change that calibration objective.
+        initial_ir_precursor_atoms=round(
+            np.count_nonzero(lattice.occupation == Species.CE)
+            * parameters.precursor_ir_to_ce_atom_ratio
+        ),
     )
     result = {}
     for time_min in PAPER_TARGET_TIMES_MIN:

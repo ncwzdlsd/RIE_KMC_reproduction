@@ -43,6 +43,10 @@ class IrParameters:
     reduction_barrier_ev: float = 0.0
     oxidation_barrier_ev: float = 0.0
     precursor_ir_to_ce_atom_ratio: float = 0.0
+    # Fraction of dosed precursor expected to remain as support-connected Ir
+    # after reaction and workup.  The ICP-OES ratio describes that retained
+    # product, not the amount initially present in solution.
+    precursor_retention_fraction: float = 1.0
 
     def __post_init__(self):
         if self.temperature_k <= 0.0:
@@ -77,6 +81,13 @@ class IrParameters:
         ):
             raise ValueError(
                 "precursor_ir_to_ce_atom_ratio must be finite and non-negative"
+            )
+        if (
+            not 0.0 < self.precursor_retention_fraction <= 1.0
+            or not math.isfinite(self.precursor_retention_fraction)
+        ):
+            raise ValueError(
+                "precursor_retention_fraction must be finite and in (0, 1]"
             )
 
 

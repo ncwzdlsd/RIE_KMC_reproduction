@@ -56,7 +56,13 @@ class KineticParameterSet:
     ir_oxidation_barrier_ev: float = 0.0
     chemical_potential_ir_ion_ev: float = -0.15
     reduction_free_energy_ev: float = -0.10
+    # Table S9 reports Ir retained in the washed final catalyst.  Use that
+    # ratio as the supported-Ir target and correct the initial finite dose for
+    # incomplete capture.  The 10% initial estimate follows the present
+    # sonicated 180 min pilot (26 supported atoms from a dose of 248) and must
+    # be refined together with the unpublished Ir kinetic parameters.
     precursor_ir_to_ce_atom_ratio: float = PAPER_RIE_IR_TO_CE_ATOM_RATIO
+    precursor_retention_fraction: float = 0.10
 
     # Propensity of one eligible nanoparticle-solution interface center.  The
     # total sonication propensity is this value times the current number of
@@ -98,6 +104,7 @@ class KineticParameterSet:
             reduction_barrier_ev=self.ir_reduction_barrier_ev,
             oxidation_barrier_ev=self.ir_oxidation_barrier_ev,
             precursor_ir_to_ce_atom_ratio=self.precursor_ir_to_ce_atom_ratio,
+            precursor_retention_fraction=self.precursor_retention_fraction,
         )
 
     def sonication_parameters(self) -> SonicationParameters:

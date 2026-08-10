@@ -357,10 +357,18 @@ class LocalKMC:
                 | (lattice.occupation == Species.IR)
             )
         )
-        if initial_ir_precursor_atoms is None:
-            scaled_inventory = round(
+        self.target_supported_ir_atoms = int(
+            math.ceil(
                 self.initial_ce_atoms
                 * self.ir_parameters.precursor_ir_to_ce_atom_ratio
+            )
+        )
+        if initial_ir_precursor_atoms is None:
+            scaled_inventory = int(
+                math.ceil(
+                    self.target_supported_ir_atoms
+                    / self.ir_parameters.precursor_retention_fraction
+                )
             )
             initial_ir_precursor_atoms = max(
                 solid_ir_atoms,
@@ -850,6 +858,10 @@ class LocalKMC:
         )
         row["net_released_O_atoms"] = int(net_released_o)
         row["net_adsorbed_Ir_atoms"] = int(net_adsorbed_ir)
+        row["target_supported_Ir_atoms"] = self.target_supported_ir_atoms
+        row["assumed_Ir_retention_fraction"] = (
+            self.ir_parameters.precursor_retention_fraction
+        )
         row["initial_Ir_precursor_atoms"] = self.initial_ir_precursor_atoms
         row["solution_Ir_precursor_atoms"] = (
             self.state.solution_ir_precursor_atoms

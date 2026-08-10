@@ -187,6 +187,8 @@ def write_metrics(
         "net_released_Ce_fraction",
         "net_released_O_atoms",
         "net_adsorbed_Ir_atoms",
+        "target_supported_Ir_atoms",
+        "assumed_Ir_retention_fraction",
         "initial_Ir_precursor_atoms",
         "solution_Ir_precursor_atoms",
         "Ir_precursor_fraction_remaining",
@@ -285,8 +287,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--ir-precursor-atoms",
         type=int,
         help=(
-            "Override the finite total Ir inventory. By default it is scaled "
-            "from the initial Ce count using the Table S9 RIE Ir/Ce ratio."
+            "Override the finite total Ir dose. By default the Table S9 final "
+            "supported-Ir/Ce target is divided by the assumed precursor "
+            "retention fraction."
         ),
     )
     parser.add_argument("--reconcile-every", type=int, default=100_000)
@@ -415,9 +418,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             "ir_inventory": "finite_conserved_precursor_reservoir",
             "ir_adsorption_activity": "remaining_precursor_fraction",
             "initial_ir_precursor_atoms": control_engine.initial_ir_precursor_atoms,
+            "target_supported_ir_atoms": control_engine.target_supported_ir_atoms,
             "initial_ce_atoms": control_engine.initial_ce_atoms,
             "ir_to_ce_atom_ratio": parameters.precursor_ir_to_ce_atom_ratio,
-            "ir_capacity_basis": "Table_S9_RIE_Ir_to_Ce_atom_ratio_scaled_by_initial_Ce",
+            "assumed_ir_retention_fraction": parameters.precursor_retention_fraction,
+            "ir_capacity_basis": "Table_S9_final_supported_Ir_to_Ce_target_corrected_for_incomplete_precursor_retention",
             "ir_diffusion": "nearest_neighbor_hops_over_all_solution_accessible_empty_M_sites",
             "ir_reduction": "only_at_support_or_existing_metallic_Ir_attachment_sites",
             "xyz_ir_visibility": "only_Ir_clusters_connected_to_CeOx; unattached_transport_Ir_remains_in_KMC_state",
