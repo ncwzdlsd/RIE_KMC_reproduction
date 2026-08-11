@@ -1,4 +1,4 @@
-"""Run the standard 0-180 min KMC comparison with and without sonication."""
+"""Compare supported Ir exposure/embedding with and without sonication."""
 
 from __future__ import annotations
 
@@ -244,6 +244,51 @@ def write_metrics(
         writer.writerows(rows)
 
 
+def write_ir_embedding_comparison(
+    filename: Path,
+    control_metrics: list[dict],
+    sonicated_metrics: list[dict],
+) -> None:
+    """Write the focused supported/surface/embedded Ir comparison."""
+    rows = []
+    for control, sonicated in zip(control_metrics, sonicated_metrics):
+        control_surface = (
+            control["attached_Ir_total"] - control["embedded_Ir_total"]
+        )
+        sonicated_surface = (
+            sonicated["attached_Ir_total"] - sonicated["embedded_Ir_total"]
+        )
+        rows.append(
+            {
+                "sample_time_min": control["sample_time_min"],
+                "no_sonication_supported_Ir": control["attached_Ir_total"],
+                "no_sonication_surface_Ir": control_surface,
+                "no_sonication_embedded_Ir": control["embedded_Ir_total"],
+                "no_sonication_embedding_fraction": control[
+                    "Ir_embedding_fraction"
+                ],
+                "sonication_supported_Ir": sonicated["attached_Ir_total"],
+                "sonication_surface_Ir": sonicated_surface,
+                "sonication_embedded_Ir": sonicated["embedded_Ir_total"],
+                "sonication_embedding_fraction": sonicated[
+                    "Ir_embedding_fraction"
+                ],
+                "delta_embedded_Ir": (
+                    sonicated["embedded_Ir_total"]
+                    - control["embedded_Ir_total"]
+                ),
+                "delta_embedding_fraction": (
+                    sonicated["Ir_embedding_fraction"]
+                    - control["Ir_embedding_fraction"]
+                ),
+            }
+        )
+    with filename.open("w", encoding="utf-8", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def run_condition(
     engine: LocalKMC,
     target_times_min: tuple[float, ...],
@@ -351,9 +396,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         else KineticParameterSet()
     )
     args.parameter_file = selected_parameter_file
-    # The formal comparison is the fixed-high-chemical-potential case used in
-    # supplementary Figs. S31/S34.  A legacy parameter file may contain the
-    # former -0.69 -> -0.60 feedback settings, so force the selected bath here.
+    # Use the same fixed bath for both conditions so their Ir embedding
+    # difference is attributable to the independently applied sonication.
+    # A legacy parameter file may contain the former -0.69 -> -0.60 feedback
+    # settings, so force the selected bath here.
     parameters = replace(
         parameters,
         chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
@@ -440,16 +486,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         visualization_mode="ir_only",
     )
     write_metrics(root / "metrics.csv", control_metrics, sonicated_metrics)
+    write_ir_embedding_comparison(
+        root / "ir_embedding_comparison.csv",
+        control_metrics,
+        sonicated_metrics,
+    )
     final_control = control_metrics[-1]
     final_sonicated = sonicated_metrics[-1]
     first_post_initial_index = 1 if len(control_metrics) > 1 else 0
     early_control = control_metrics[first_post_initial_index]
     early_sonicated = sonicated_metrics[first_post_initial_index]
-    paper_trend_checks = {
-        "sonication_accelerates_support_growth": (
-            final_sonicated["equivalent_diameter_nm"]
-            > final_control["equivalent_diameter_nm"]
-        ),
+    ir_embedding_checks = {
         "sonication_increases_Ir_embedding_fraction": (
             final_sonicated["Ir_embedding_fraction"]
             > final_control["Ir_embedding_fraction"]
@@ -462,12 +509,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             final_control["Ir_inventory_error_atoms"] == 0
             and final_sonicated["Ir_inventory_error_atoms"] == 0
         ),
-        "main_particle_Ir_is_within_20_percent_of_target": (
-            0.8 <= final_control["main_particle_Ir_target_fraction"] <= 1.2
-            and 0.8 <= final_sonicated["main_particle_Ir_target_fraction"] <= 1.2
-        ),
     }
-    paper_trend_checks["all_pass"] = all(paper_trend_checks.values())
+    ir_embedding_checks["all_pass"] = all(ir_embedding_checks.values())
     metadata = {
         "target_times_min": args.target_times_min,
         "arguments": {
@@ -521,7 +564,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "ir_only_snapshot_files": [
             str(path.relative_to(root)) for path in ir_only_snapshot_files
         ],
-        "paper_trend_checks": paper_trend_checks,
+        "ir_embedding_checks": ir_embedding_checks,
         "final_metrics": {
             "no_sonication": final_control,
             "sonication": final_sonicated,
@@ -575,10 +618,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{sonicated_metrics[-1]['unattached_Ir_total']}"
     )
     print(
-        "Paper-trend checks: "
-        + ("PASS" if paper_trend_checks["all_pass"] else "REVIEW")
+        "Final surface/embedded supported Ir: "
+        f"no-sonication="
+        f"{final_control['attached_Ir_total'] - final_control['embedded_Ir_total']}/"
+        f"{final_control['embedded_Ir_total']} "
+        f"({final_control['Ir_embedding_fraction']:.3f} embedded), "
+        f"sonication="
+        f"{final_sonicated['attached_Ir_total'] - final_sonicated['embedded_Ir_total']}/"
+        f"{final_sonicated['embedded_Ir_total']} "
+        f"({final_sonicated['Ir_embedding_fraction']:.3f} embedded)"
+    )
+    print(
+        "Ir-embedding checks: "
+        + ("PASS" if ir_embedding_checks["all_pass"] else "REVIEW")
         + " "
-        + json.dumps(paper_trend_checks, ensure_ascii=False)
+        + json.dumps(ir_embedding_checks, ensure_ascii=False)
     )
 
 

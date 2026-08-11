@@ -39,8 +39,8 @@ class KineticParameterSet:
     ce_adsorption_prefactor_s: float = 1.0e-3
     ce_desorption_prefactor_s: float = 1.0e-3
     ce_exchange_barrier_ev: float = 0.0
-    # The paper-style comparison uses the fixed high-concentration bath from
-    # Figs. S31/S34.  Dissolved Ce/O is diagnostic and does not feed back into
+    # The comparison uses the same fixed high-concentration bath in both
+    # conditions. Dissolved Ce/O is diagnostic and does not feed back into
     # either chemical potential during a run.
     chemical_potential_ce_ev: float = PAPER_CHEMICAL_POTENTIAL_CE_EV
     chemical_potential_o_ev: float = PAPER_CHEMICAL_POTENTIAL_O_EV
