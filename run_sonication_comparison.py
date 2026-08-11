@@ -117,7 +117,7 @@ def write_paired_frame(
             "Properties=species:S:1:pos:R:3:surface:I:1:ir_state:I:1:"
             "embedded:I:1:support_contacts:I:1:condition:I:1 "
             f"time_min={sample_time_min:g} condition=0:no_sonication "
-            "condition=1:sonication ir_output=support_connected_only\n"
+            "condition=1:sonication output=main_CeOx_connected_only\n"
         )
         for record in paired_records:
             name, x, y, z, surface, ir_state, embedded, contacts, condition = record
@@ -164,6 +164,9 @@ def write_metrics(
         "step",
         "number_Ce",
         "number_O",
+        "main_particle_Ce",
+        "main_particle_O",
+        "detached_support_atoms",
         "number_Ir_ion",
         "number_Ir",
         "attached_Ir_ion",
@@ -183,6 +186,9 @@ def write_metrics(
         "largest_Ir_cluster_radius_gyration_nm",
         "largest_Ir_cluster_shape_anisotropy",
         "equivalent_diameter_nm",
+        "support_shape_anisotropy",
+        "support_axis_extent_ratio",
+        "support_surface_radial_cv",
         "net_released_Ce_atoms",
         "net_released_Ce_fraction",
         "net_released_O_atoms",
@@ -310,7 +316,15 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     selected_parameter_file = args.parameter_file
     if selected_parameter_file is None and DEFAULT_PARAMETER_FILE.exists():
-        selected_parameter_file = DEFAULT_PARAMETER_FILE
+        candidate_parameters = KineticParameterSet.read(DEFAULT_PARAMETER_FILE)
+        if candidate_parameters.calibrated:
+            selected_parameter_file = DEFAULT_PARAMETER_FILE
+        else:
+            print(
+                f"Ignoring failed calibration file {DEFAULT_PARAMETER_FILE}; "
+                "using the current built-in diagnostic parameters.",
+                flush=True,
+            )
     parameters = (
         KineticParameterSet.read(selected_parameter_file)
         if selected_parameter_file is not None
@@ -349,14 +363,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     sonicated_lattice = copy.deepcopy(initial_lattice)
     control_engine = LocalKMC(
         control_lattice,
-        parameters.ceox_parameters(),
+        parameters.ceox_parameters(sonication=False),
         parameters.ir_parameters(),
         random_seed=args.seed,
         initial_ir_precursor_atoms=args.ir_precursor_atoms,
     )
     sonicated_engine = LocalKMC(
         sonicated_lattice,
-        parameters.ceox_parameters(),
+        parameters.ceox_parameters(sonication=True),
         parameters.ir_parameters(),
         sonication_parameters=parameters.sonication_parameters(),
         random_seed=args.seed,
@@ -389,6 +403,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         root / "snapshots",
     )
     write_metrics(root / "metrics.csv", control_metrics, sonicated_metrics)
+    final_control = control_metrics[-1]
+    final_sonicated = sonicated_metrics[-1]
+    first_post_initial_index = 1 if len(control_metrics) > 1 else 0
+    early_control = control_metrics[first_post_initial_index]
+    early_sonicated = sonicated_metrics[first_post_initial_index]
+    paper_trend_checks = {
+        "sonication_accelerates_support_growth": (
+            final_sonicated["equivalent_diameter_nm"]
+            > final_control["equivalent_diameter_nm"]
+        ),
+        "sonication_increases_Ir_embedding_fraction": (
+            final_sonicated["Ir_embedding_fraction"]
+            > final_control["Ir_embedding_fraction"]
+        ),
+        "Ir_is_visible_after_first_nonzero_sample": (
+            early_control["attached_Ir_total"] > 0
+            or early_sonicated["attached_Ir_total"] > 0
+        ),
+        "Ir_inventory_is_conserved": (
+            final_control["Ir_inventory_error_atoms"] == 0
+            and final_sonicated["Ir_inventory_error_atoms"] == 0
+        ),
+    }
+    paper_trend_checks["all_pass"] = all(paper_trend_checks.values())
     metadata = {
         "target_times_min": args.target_times_min,
         "arguments": {
@@ -408,9 +446,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             "ce_o_exchange": "solution_exposed_CeOx_growth_sites",
             "o_ir_interface": "O adsorption/desorption includes adjacent ionic and metallic Ir binding",
             "ce_o_inventory": "grand canonical; net exchange is derived from event counts only",
-            "chemical_potential_response": "fixed; no feedback from desorption or cumulative sonication dissolution",
+            "chemical_potential_response": "condition-specific fitted well-mixed-bath enrichment from sonication-driven population dissolution",
             "fixed_chemical_potential_Ce_ev": parameters.chemical_potential_ce_ev,
             "fixed_chemical_potential_O_ev": parameters.chemical_potential_o_ev,
+            "sonication_chemical_potential_shift_ev": parameters.sonication_chemical_potential_shift_ev,
             "sonication_event_catalog": "one_candidate_KMC_event_per_current_nanoparticle_solution_interface_site",
             "sonication_event_selection": "n_fold_way_total_propensity_then_uniform_interface_center",
             "sonication_rate_parameter_unit": "s^-1_per_interface_site",
@@ -422,10 +461,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             "initial_ce_atoms": control_engine.initial_ce_atoms,
             "ir_to_ce_atom_ratio": parameters.precursor_ir_to_ce_atom_ratio,
             "assumed_ir_retention_fraction": parameters.precursor_retention_fraction,
-            "ir_capacity_basis": "Table_S9_final_supported_Ir_to_Ce_target_corrected_for_incomplete_precursor_retention",
+            "ir_capacity_basis": "Table_S9_final_supported_Ir_to_Ce_target_without_an_unpublished_retention_correction",
             "ir_diffusion": "nearest_neighbor_hops_over_all_solution_accessible_empty_M_sites",
             "ir_reduction": "only_at_support_or_existing_metallic_Ir_attachment_sites",
-            "xyz_ir_visibility": "only_Ir_clusters_connected_to_CeOx; unattached_transport_Ir_remains_in_KMC_state",
+            "xyz_visibility": "largest_CeOx_component_and_only_Ir_clusters_connected_to_that_main_particle; detached_fragments_and_transport_Ir_remain_in_KMC_state",
             "ir_morphology": "diffusion_dominated_ionic_relaxation_before_reduction",
             "metallic_ir_surface_diffusion": False,
             "bulk_ir_reduction": False,
@@ -434,9 +473,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "snapshot_files": [
             str(path.relative_to(root)) for path in snapshot_files
         ],
+        "paper_trend_checks": paper_trend_checks,
         "final_metrics": {
-            "no_sonication": control_metrics[-1],
-            "sonication": sonicated_metrics[-1],
+            "no_sonication": final_control,
+            "sonication": final_sonicated,
         },
         "event_counts": {
             "no_sonication": dict(control_engine.state.event_counts),
@@ -477,6 +517,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"{control_metrics[-1]['unattached_Ir_total']}, "
         f"sonication={sonicated_metrics[-1]['attached_Ir_total']}/"
         f"{sonicated_metrics[-1]['unattached_Ir_total']}"
+    )
+    print(
+        "Paper-trend checks: "
+        + ("PASS" if paper_trend_checks["all_pass"] else "REVIEW")
+        + " "
+        + json.dumps(paper_trend_checks, ensure_ascii=False)
     )
 
 

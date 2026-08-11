@@ -16,6 +16,7 @@ from constants import SiteType, Species
 from generation import (
     find_accessible_empty_sites,
     find_external_surface,
+    find_main_support_component,
     find_supported_ir_sites,
     is_external_surface,
     ir_support_contact_count,
@@ -63,7 +64,8 @@ def calculate_current(lattice: Lattice, state: LocalKMCState) -> dict:
 
     external_surface = find_external_surface(lattice)
     ir_mask = (occupation == Species.IR_ION) | (occupation == Species.IR)
-    supported_ir = find_supported_ir_sites(lattice)
+    main_support = find_main_support_component(lattice)
+    supported_ir = find_supported_ir_sites(lattice, main_support)
     attached_ir_ion = int(
         np.count_nonzero(supported_ir & (occupation == Species.IR_ION))
     )
@@ -82,7 +84,7 @@ def calculate_current(lattice: Lattice, state: LocalKMCState) -> dict:
     # transport ions elsewhere in the box remain only in inventory metrics.
     ir_site_ids = np.flatnonzero(ir_mask & supported_ir)
     support_contacts = [
-        ir_support_contact_count(lattice, int(site_id))
+        ir_support_contact_count(lattice, int(site_id), main_support)
         for site_id in ir_site_ids
     ]
     ir_neighbor_counts = []
@@ -130,16 +132,72 @@ def calculate_current(lattice: Lattice, state: LocalKMCState) -> dict:
             )
 
     volume_per_ce_nm3 = lattice.lattice_constant_nm**3 / 4.0
-    particle_volume_nm3 = number_ce * volume_per_ce_nm3
+    main_particle_ce = int(
+        np.count_nonzero(main_support & (occupation == Species.CE))
+    )
+    main_particle_o = int(
+        np.count_nonzero(main_support & (occupation == Species.O))
+    )
+    particle_volume_nm3 = main_particle_ce * volume_per_ce_nm3
     equivalent_diameter_nm = 2.0 * (
         3.0 * particle_volume_nm3 / (4.0 * math.pi)
     ) ** (1.0 / 3.0)
+
+    # Quantify the support shape independently of the Ir-cluster metrics.  A
+    # symmetric octahedron can have a near-zero gyration anisotropy, so radial
+    # variation of the actual solution-facing support atoms is also reported.
+    support_mask = main_support
+    support_ids = np.flatnonzero(support_mask)
+    support_surface_ids = np.flatnonzero(external_surface & support_mask)
+    support_shape_anisotropy = 0.0
+    support_axis_extent_ratio = 0.0
+    support_surface_radial_cv = 0.0
+    if len(support_ids) > 1:
+        support_positions = lattice.positions_nm[support_ids]
+        support_center = support_positions.mean(axis=0)
+        centered_support = support_positions - support_center
+        support_gyration = centered_support.T @ centered_support / len(support_ids)
+        support_eigenvalues = np.maximum(
+            np.linalg.eigvalsh(support_gyration), 0.0
+        )
+        support_eigenvalue_sum = float(support_eigenvalues.sum())
+        if support_eigenvalue_sum > 0.0:
+            mean_support_eigenvalue = support_eigenvalue_sum / 3.0
+            support_shape_anisotropy = float(
+                1.5
+                * np.square(
+                    support_eigenvalues - mean_support_eigenvalue
+                ).sum()
+                / support_eigenvalue_sum**2
+            )
+        extents = np.ptp(support_positions, axis=0)
+        maximum_extent = float(extents.max())
+        if maximum_extent > 0.0:
+            support_axis_extent_ratio = float(extents.min() / maximum_extent)
+        if len(support_surface_ids) > 1:
+            surface_radii = np.linalg.norm(
+                lattice.positions_nm[support_surface_ids] - support_center,
+                axis=1,
+            )
+            mean_surface_radius = float(surface_radii.mean())
+            if mean_surface_radius > 0.0:
+                support_surface_radial_cv = float(
+                    surface_radii.std() / mean_surface_radius
+                )
 
     return {
         "step": state.step,
         "KMC_time": state.kmc_time,
         "number_Ce": number_ce,
         "number_O": number_o,
+        "main_particle_Ce": main_particle_ce,
+        "main_particle_O": main_particle_o,
+        "detached_support_atoms": int(
+            np.count_nonzero(
+                ((occupation == Species.CE) | (occupation == Species.O))
+                & ~main_support
+            )
+        ),
         "number_Ir_ion": number_ir_ion,
         "number_Ir": number_ir,
         "attached_Ir_ion": attached_ir_ion,
@@ -167,6 +225,9 @@ def calculate_current(lattice: Lattice, state: LocalKMCState) -> dict:
         "largest_Ir_cluster_radius_gyration_nm": cluster_radius_gyration_nm,
         "largest_Ir_cluster_shape_anisotropy": cluster_shape_anisotropy,
         "equivalent_diameter_nm": equivalent_diameter_nm,
+        "support_shape_anisotropy": support_shape_anisotropy,
+        "support_axis_extent_ratio": support_axis_extent_ratio,
+        "support_surface_radial_cv": support_surface_radial_cv,
         "sonication_event_count": state.event_counts[
             SonicationEventType.CORROSION.value
         ],
@@ -898,11 +959,14 @@ class LocalKMC:
                 (self.lattice.occupation == Species.IR_ION)
                 | (self.lattice.occupation == Species.IR)
             )
-            supported_ir = find_supported_ir_sites(self.lattice)
+            main_support = find_main_support_component(self.lattice)
+            supported_ir = find_supported_ir_sites(
+                self.lattice, main_support
+            )
             total_ir = int(np.count_nonzero(ir_mask))
             visible_ir = int(np.count_nonzero(ir_mask & supported_ir))
             visibility_comment = (
-                "ir_output=support_connected_only "
+                "output=main_CeOx_connected_only "
                 f"visible_Ir={visible_ir} hidden_unattached_Ir={total_ir-visible_ir} "
             )
         write_xyz(

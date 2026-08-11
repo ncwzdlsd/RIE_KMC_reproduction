@@ -77,13 +77,13 @@ def simulate_metrics(
     )
     engine = LocalKMC(
         lattice,
-        parameters.ceox_parameters(),
+        parameters.ceox_parameters(sonication=sonication),
         parameters.ir_parameters(),
         sonication_parameters=(parameters.sonication_parameters() if sonication else None),
         random_seed=seed,
         # This preparation fits Ce/O exchange and sonication only.  Keep its
-        # historical target-scale Ir inventory so the new precursor-retention
-        # assumption does not silently change that calibration objective.
+        # Ir kinetics are outside this Ce/O calibration; keep a target-scale
+        # inventory so Ir transport does not dominate the objective.
         initial_ir_precursor_atoms=round(
             np.count_nonzero(lattice.occupation == Species.CE)
             * parameters.precursor_ir_to_ce_atom_ratio
@@ -163,6 +163,7 @@ def calibrate(
     )
     rng = np.random.default_rng(config.random_seed)
     best_scales = np.asarray([1.0, 1.0], dtype=float)
+    best_shift = initial.sonication_chemical_potential_shift_ev
     best_parameters = initial
     best_objective, best_summary = calibration_objective(best_parameters, config)
     history = [
@@ -171,6 +172,7 @@ def calibrate(
             "objective": best_objective,
             "ce_scale": 1.0,
             "sonication_scale": 1.0,
+            "sonication_chemical_potential_shift_ev": best_shift,
             "chemical_potential_ce_o_ev": initial.chemical_potential_ce_ev,
             "accepted": True,
         }
@@ -179,14 +181,19 @@ def calibrate(
     for iteration in range(1, config.iterations + 1):
         cooling = max(0.15, 1.0 - iteration / (config.iterations + 1.0))
         proposed_scales = best_scales * np.exp(rng.normal(0.0, 0.9 * cooling, size=2))
+        proposed_shift = float(
+            np.clip(best_shift + rng.normal(0.0, 0.025 * cooling), 0.0, 0.15)
+        )
         candidate = initial.scaled(
             ce_scale=float(proposed_scales[0]),
             sonication_scale=float(proposed_scales[1]),
+            sonication_chemical_potential_shift_ev=proposed_shift,
         )
         objective, summary = calibration_objective(candidate, config)
         accepted = objective < best_objective
         if accepted:
             best_scales = proposed_scales
+            best_shift = proposed_shift
             best_parameters = candidate
             best_objective = objective
             best_summary = summary
@@ -196,6 +203,7 @@ def calibrate(
                 "objective": objective,
                 "ce_scale": float(proposed_scales[0]),
                 "sonication_scale": float(proposed_scales[1]),
+                "sonication_chemical_potential_shift_ev": proposed_shift,
                 "chemical_potential_ce_o_ev": initial.chemical_potential_ce_ev,
                 "accepted": accepted,
             }
@@ -207,8 +215,8 @@ def calibrate(
         calibration_objective=best_objective,
         calibration_scope=(
             "Ce/O exchange time scale and per-interface-site sonication "
-            "propensity fitted to Tables S3/S5 at fixed Ce/O chemical "
-            "potential; "
+            "propensity and sonicated-bath chemical-potential increment "
+            "fitted to Tables S3/S5; "
             "Ir rates remain "
             "explicit initial estimates"
         ),

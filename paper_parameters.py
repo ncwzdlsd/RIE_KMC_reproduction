@@ -58,4 +58,5 @@ UNPUBLISHED_FITTED_PARAMETERS = (
     "ir_reduction_barrier_ev",
     "ir_oxidation_barrier_ev",
     "sonication_event_rate_s",
+    "sonication_chemical_potential_shift_ev",
 )
