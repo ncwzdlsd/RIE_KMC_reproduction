@@ -16,9 +16,10 @@ class SonicationParameters:
     """Paper-inspired stochastic corrosion at the particle-solution interface.
 
     The paper specifies a 1 nm sphere and a 10% dissolution probability, but
-    does not report the event frequency.  ``event_rate`` is the KMC propensity
-    per eligible nanoparticle-solution interface center (s^-1 per site), and
-    must be fitted before interpreting KMC time quantitatively.
+    does not report the event frequency.  ``event_rate`` belongs to an
+    independent Poisson condition clock per eligible interface center
+    (s^-1 per site); it is not a chemical KMC reaction propensity and must be
+    fitted before interpreting the acoustic exposure quantitatively.
     """
 
     event_rate: float

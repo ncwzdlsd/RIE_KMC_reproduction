@@ -23,6 +23,7 @@ from paper_parameters import (
     PAPER_CHEMICAL_POTENTIAL_O_EV,
     PAPER_TARGET_TIMES_MIN,
 )
+from sonication_events import SonicationEventType
 
 
 SEPARATION_NM = 8.0
@@ -90,6 +91,7 @@ def write_paired_frame(
     sonicated_filename: Path,
     output_filename: Path,
     sample_time_min: float,
+    visualization_mode: str = "structure",
 ) -> None:
     paired_records = []
     for condition, source, shift in (
@@ -97,6 +99,8 @@ def write_paired_frame(
         (1, sonicated_filename, 0.5 * SEPARATION_NM),
     ):
         for name, x, y, z, surface, ir_state, embedded, contacts in read_snapshot_records(source):
+            if visualization_mode == "ir_only" and name != "Ir":
+                continue
             paired_records.append(
                 (
                     name,
@@ -113,18 +117,29 @@ def write_paired_frame(
 
     with output_filename.open("w", encoding="utf-8", newline="\n") as output:
         output.write(f"{len(paired_records)}\n")
-        output.write(
+        property_schema = (
             "Properties=species:S:1:pos:R:3:surface:I:1:ir_state:I:1:"
-            "embedded:I:1:support_contacts:I:1:condition:I:1 "
+            "embedded:I:1:support_contacts:I:1:condition:I:1"
+        )
+        if visualization_mode in ("ir_emphasis", "ir_only"):
+            property_schema += ":Radius:R:1:Transparency:R:1"
+        output.write(
+            property_schema + " "
             f"time_min={sample_time_min:g} condition=0:no_sonication "
-            "condition=1:sonication output=main_CeOx_connected_only\n"
+            "condition=1:sonication output=main_CeOx_connected_only "
+            f"visualization={visualization_mode}\n"
         )
         for record in paired_records:
             name, x, y, z, surface, ir_state, embedded, contacts, condition = record
-            output.write(
+            row = (
                 f"{name} {x:.6f} {y:.6f} {z:.6f} {surface} "
-                f"{ir_state} {embedded} {contacts} {condition}\n"
+                f"{ir_state} {embedded} {contacts} {condition}"
             )
+            if visualization_mode in ("ir_emphasis", "ir_only"):
+                radius = {"Ce": 0.085, "O": 0.045, "Ir": 0.19}[name]
+                transparency = {"Ce": 0.60, "O": 0.82, "Ir": 0.0}[name]
+                row += f" {radius:.3f} {transparency:.2f}"
+            output.write(row + "\n")
 
 
 def write_trajectory(
@@ -132,6 +147,7 @@ def write_trajectory(
     output_filename: Path,
     target_times_min: tuple[float, ...],
     snapshot_directory: Path,
+    visualization_mode: str = "structure",
 ) -> list[Path]:
     snapshot_directory.mkdir(parents=True, exist_ok=True)
 
@@ -148,6 +164,7 @@ def write_trajectory(
                 raw_root / "sonication" / name,
                 frame_file,
                 time_min,
+                visualization_mode=visualization_mode,
             )
             trajectory.write(frame_file.read_text(encoding="utf-8"))
             snapshot_files.append(frame_file)
@@ -194,16 +211,19 @@ def write_metrics(
         "net_released_O_atoms",
         "net_adsorbed_Ir_atoms",
         "target_supported_Ir_atoms",
+        "main_particle_Ir_target_fraction",
         "assumed_Ir_retention_fraction",
         "initial_Ir_precursor_atoms",
         "solution_Ir_precursor_atoms",
         "Ir_precursor_fraction_remaining",
+        "Ir_adsorption_activity_relative_to_target",
         "Ir_inventory_error_atoms",
         "effective_chemical_potential_Ce_ev",
         "effective_chemical_potential_O_ev",
         "sonication_removed_Ce_atoms",
         "sonication_removed_O_atoms",
         "interface_support_site_count",
+        "sonication_condition_frequency_per_s",
         "sonication_total_propensity_per_s",
         "sonication_event_count",
         "sonication_removed_atoms",
@@ -338,6 +358,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         parameters,
         chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
         chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
+        # Sonication is an external condition only.  Force legacy parameter
+        # files to use the same fixed bath values in both conditions.
+        sonication_chemical_potential_shift_ev=0.0,
     )
     if not parameters.calibrated and args.require_calibrated:
         parser.error(
@@ -402,6 +425,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.target_times_min,
         root / "snapshots",
     )
+    ir_emphasis_snapshot_files = write_trajectory(
+        raw_root,
+        root / "trajectory_ir_emphasis.xyz",
+        args.target_times_min,
+        root / "snapshots_ir_emphasis",
+        visualization_mode="ir_emphasis",
+    )
+    ir_only_snapshot_files = write_trajectory(
+        raw_root,
+        root / "trajectory_ir_only.xyz",
+        args.target_times_min,
+        root / "snapshots_ir_only",
+        visualization_mode="ir_only",
+    )
     write_metrics(root / "metrics.csv", control_metrics, sonicated_metrics)
     final_control = control_metrics[-1]
     final_sonicated = sonicated_metrics[-1]
@@ -425,6 +462,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             final_control["Ir_inventory_error_atoms"] == 0
             and final_sonicated["Ir_inventory_error_atoms"] == 0
         ),
+        "main_particle_Ir_is_within_20_percent_of_target": (
+            0.8 <= final_control["main_particle_Ir_target_fraction"] <= 1.2
+            and 0.8 <= final_sonicated["main_particle_Ir_target_fraction"] <= 1.2
+        ),
     }
     paper_trend_checks["all_pass"] = all(paper_trend_checks.values())
     metadata = {
@@ -446,22 +487,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             "ce_o_exchange": "solution_exposed_CeOx_growth_sites",
             "o_ir_interface": "O adsorption/desorption includes adjacent ionic and metallic Ir binding",
             "ce_o_inventory": "grand canonical; net exchange is derived from event counts only",
-            "chemical_potential_response": "condition-specific fitted well-mixed-bath enrichment from sonication-driven population dissolution",
+            "chemical_potential_response": "fixed_identical_minus_0.60_eV_Ce_O_bath_values; acoustic_removal_has_no_feedback",
             "fixed_chemical_potential_Ce_ev": parameters.chemical_potential_ce_ev,
             "fixed_chemical_potential_O_ev": parameters.chemical_potential_o_ev,
             "sonication_chemical_potential_shift_ev": parameters.sonication_chemical_potential_shift_ev,
-            "sonication_event_catalog": "one_candidate_KMC_event_per_current_nanoparticle_solution_interface_site",
-            "sonication_event_selection": "n_fold_way_total_propensity_then_uniform_interface_center",
+            "sonication_event_catalog": "independent_acoustic_condition_clock_per_current_nanoparticle_solution_interface_site",
+            "sonication_event_selection": "independent_Poisson_clock_then_uniform_interface_center; excluded_from_KMC_step_count",
             "sonication_rate_parameter_unit": "s^-1_per_interface_site",
+            "sonication_frequency_metric": "sonication_condition_frequency_per_s",
             "ir_exchange": "adsorption_and_desorption_only_at_box_edge_M_sites",
             "ir_inventory": "finite_conserved_precursor_reservoir",
-            "ir_adsorption_activity": "remaining_precursor_fraction",
+            "ir_adsorption_activity": "remaining_precursor_atoms_divided_by_Table_S9_supported_Ir_target_at_fixed_box_volume",
             "initial_ir_precursor_atoms": control_engine.initial_ir_precursor_atoms,
             "target_supported_ir_atoms": control_engine.target_supported_ir_atoms,
             "initial_ce_atoms": control_engine.initial_ce_atoms,
             "ir_to_ce_atom_ratio": parameters.precursor_ir_to_ce_atom_ratio,
             "assumed_ir_retention_fraction": parameters.precursor_retention_fraction,
-            "ir_capacity_basis": "Table_S9_final_supported_Ir_to_Ce_target_without_an_unpublished_retention_correction",
+            "ir_capacity_basis": "user_requested_approximately_600_atom_precursor_dose_for_standard_5nm_support_while_Table_S9_defines_the_separate_supported_Ir_target",
             "ir_diffusion": "nearest_neighbor_hops_over_all_solution_accessible_empty_M_sites",
             "ir_reduction": "only_at_support_or_existing_metallic_Ir_attachment_sites",
             "xyz_visibility": "largest_CeOx_component_and_only_Ir_clusters_connected_to_that_main_particle; detached_fragments_and_transport_Ir_remain_in_KMC_state",
@@ -473,6 +515,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         "snapshot_files": [
             str(path.relative_to(root)) for path in snapshot_files
         ],
+        "ir_emphasis_snapshot_files": [
+            str(path.relative_to(root)) for path in ir_emphasis_snapshot_files
+        ],
+        "ir_only_snapshot_files": [
+            str(path.relative_to(root)) for path in ir_only_snapshot_files
+        ],
         "paper_trend_checks": paper_trend_checks,
         "final_metrics": {
             "no_sonication": final_control,
@@ -481,6 +529,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "event_counts": {
             "no_sonication": dict(control_engine.state.event_counts),
             "sonication": dict(sonicated_engine.state.event_counts),
+        },
+        "condition_event_counts": {
+            "no_sonication": dict(control_engine.state.condition_event_counts),
+            "sonication": dict(sonicated_engine.state.condition_event_counts),
         },
     }
     (root / "run_metadata.json").write_text(
@@ -504,6 +556,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(
         f"Sonication: {sonicated_engine.state.step:,} events, "
         f"t={sonicated_engine.state.kmc_time / 60.0:.1f} min"
+    )
+    print(
+        "Independent sonication-condition events: "
+        f"{sonicated_engine.state.condition_event_counts[SonicationEventType.CORROSION.value]:,}"
     )
     print(
         "Finite Ir precursor per condition: "

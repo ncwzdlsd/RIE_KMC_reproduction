@@ -22,6 +22,14 @@ from paper_parameters import (
 from sonication_events import SonicationParameters
 
 
+# Diagnostic precursor dose requested for the standard 20 nm box / 5 nm
+# support.  Table S9 still defines the separate final supported-Ir target
+# (about 248 atoms for this particle); 248/600 is therefore the nominal
+# capture fraction required to reach that target from the enlarged dose.
+STANDARD_5NM_IR_PRECURSOR_ATOMS = 600
+STANDARD_5NM_SUPPORTED_IR_TARGET_ATOMS = 248
+
+
 @dataclass(frozen=True)
 class KineticParameterSet:
     """All fitted quantities needed to interpret KMC time in seconds."""
@@ -46,12 +54,13 @@ class KineticParameterSet:
     # Morphology-informed initial estimates: ions must cross the empty M-site
     # network and explore the supported interface before reduction freezes
     # them into a metallic cluster.
-    # 2.0 s^-1 per available hop yields a few support arrivals by 5 min in the
-    # 20 nm / 5 nm paper geometry without replacing explicit nearest-neighbor
-    # transport by direct deposition.  Reduction is fast enough to compete
-    # with escape once an ion reaches the support.  Both unpublished values
-    # still need a quantitative fit to the time-resolved Ir size data.
-    ir_diffusion_prefactor_s: float = 2.0
+    # With the former 248-atom dose and 2.0 s^-1 diffusion, the corrected
+    # standard run captured about 41 Ir on the sonicated main particle
+    # (16.5%).  A 600-atom dose needs 248/600 = 41.3% capture to meet the
+    # Table-S9 target.  Linear first-order scaling gives ~5.0 s^-1 as the next
+    # diagnostic estimate.  This unpublished value still requires a complete
+    # 20 nm calibration run.
+    ir_diffusion_prefactor_s: float = 5.0
     ir_reduction_prefactor_s: float = 5.0e-1
     ir_oxidation_prefactor_s: float = 1.0e-6
     ir_adsorption_barrier_ev: float = 0.0
@@ -61,46 +70,40 @@ class KineticParameterSet:
     ir_oxidation_barrier_ev: float = 0.0
     chemical_potential_ir_ion_ev: float = -0.15
     reduction_free_energy_ev: float = -0.10
-    # Table S9 reports Ir retained in the washed final catalyst.  The
-    # supplement does not publish a precursor-retention efficiency, so do not
-    # inflate the atom inventory with an arbitrary inverse-retention factor.
-    # Faster heterogeneous reduction makes the explicit target-sized dose
-    # visible at the support instead of leaving most of it in transport.
+    # Table S9 defines the retained supported-Ir target.  Keep that target
+    # separate from the larger precursor dose: for the standard 5 nm support,
+    # 248 target atoms / 600 precursor atoms gives the nominal capture factor.
+    # This 600-atom dose is a user-selected diagnostic setting, not a value
+    # published in the supplement.
     precursor_ir_to_ce_atom_ratio: float = PAPER_RIE_IR_TO_CE_ATOM_RATIO
-    precursor_retention_fraction: float = 1.0
+    precursor_retention_fraction: float = (
+        STANDARD_5NM_SUPPORTED_IR_TARGET_ATOMS
+        / STANDARD_5NM_IR_PRECURSOR_ATOMS
+    )
 
-    # Propensity of one eligible nanoparticle-solution interface center.  The
-    # total sonication propensity is this value times the current number of
-    # surface Ce/O centers.  Roughly 1,000 centers are present initially in
-    # the standard 5 nm particle, preserving an initial total rate near the
-    # previous 1e-3 s^-1 estimate without treating the particle as one event.
-    sonication_event_rate_s: float = 2.0e-6
-    # Sonication releases Ce/O from the population of small, rough particles
-    # into the well-mixed bath.  The single explicitly represented particle
-    # is the growing member of that population, so this fitted chemical-
-    # potential increment represents the experimentally observed enrichment
-    # of its shared bath (Tables S3/S5).  This remains an initial estimate for
-    # the calibration routine; the published paper does not provide the
-    # concentration-to-chemical-potential conversion.
-    sonication_chemical_potential_shift_ev: float = 0.10
+    # Independent acoustic-condition clock per eligible interface center.
+    # This is deliberately not a chemical KMC reaction propensity.  The
+    # user-requested fivefold diagnostic increase gives an initial total rate
+    # near 1e-2 s^-1 for roughly 1,000 surface centers.
+    sonication_event_rate_s: float = 1.0e-5
+    # Retained only for backward-compatible parameter-file loading.  The
+    # formal model fixes both Ce/O chemical potentials at -0.60 eV, so this
+    # deprecated offset has no effect.
+    sonication_chemical_potential_shift_ev: float = 0.0
     calibrated: bool = False
     calibration_objective: float | None = None
     calibration_scope: str = "initial guesses only"
 
     def ceox_parameters(self, sonication: bool = False) -> CeOxParameters:
-        chemical_potential_shift = (
-            self.sonication_chemical_potential_shift_ev if sonication else 0.0
-        )
+        # Sonication is an external condition clock, not a bath-composition
+        # change.  Accept the argument for API compatibility while using the
+        # same fixed chemical potentials for both conditions.
         return CeOxParameters(
             temperature_k=PAPER_TEMPERATURE_K,
             ce_o_binding_energy_ev=DFT_CE_O_BINDING_ENERGY_EV,
             ir_o_binding_energy_ev=DFT_IR_O_BINDING_ENERGY_EV,
-            chemical_potential_ce_ev=(
-                self.chemical_potential_ce_ev + chemical_potential_shift
-            ),
-            chemical_potential_o_ev=(
-                self.chemical_potential_o_ev + chemical_potential_shift
-            ),
+            chemical_potential_ce_ev=self.chemical_potential_ce_ev,
+            chemical_potential_o_ev=self.chemical_potential_o_ev,
             adsorption_prefactor=self.ce_adsorption_prefactor_s,
             desorption_prefactor=self.ce_desorption_prefactor_s,
             exchange_barrier_ev=self.ce_exchange_barrier_ev,

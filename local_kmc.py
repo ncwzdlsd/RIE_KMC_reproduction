@@ -1,4 +1,4 @@
-"""Complete local-update KMC engine for Ce/O, Ir, and sonication events."""
+"""Local-update KMC engine with an independent sonication-condition clock."""
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ class LocalKMCState:
     step: int = 0
     kmc_time: float = 0.0
     event_counts: Counter = field(default_factory=Counter)
+    condition_event_counts: Counter = field(default_factory=Counter)
     sonication_removed_atoms: int = 0
     sonication_removed_ce_atoms: int = 0
     sonication_removed_o_atoms: int = 0
@@ -228,7 +229,7 @@ def calculate_current(lattice: Lattice, state: LocalKMCState) -> dict:
         "support_shape_anisotropy": support_shape_anisotropy,
         "support_axis_extent_ratio": support_axis_extent_ratio,
         "support_surface_radial_cv": support_surface_radial_cv,
-        "sonication_event_count": state.event_counts[
+        "sonication_event_count": state.condition_event_counts[
             SonicationEventType.CORROSION.value
         ],
         "sonication_removed_atoms": state.sonication_removed_atoms,
@@ -379,7 +380,7 @@ class SparseRateBuckets:
 
 
 class LocalKMC:
-    """Incremental n-fold-way engine covering every reported event family."""
+    """Incremental n-fold-way engine plus an independent condition-event clock."""
 
     def __init__(
         self,
@@ -546,12 +547,23 @@ class LocalKMC:
             / self.initial_ir_precursor_atoms
         )
 
+    def _ir_adsorption_activity(self) -> float:
+        """Ir concentration relative to the Table-S9 target-sized bath."""
+        reference_atoms = max(
+            self.target_supported_ir_atoms,
+            1,
+        )
+        return self.state.solution_ir_precursor_atoms / reference_atoms
+
     def _ir_exchange_rate_scale(self, key: Hashable) -> float:
         kind = key[0]
         if kind == IrEventType.IR_ION_ADSORPTION:
             # Ideal well-mixed finite bath: collision/adsorption propensity is
-            # proportional to the remaining precursor concentration.
-            return self._ir_precursor_fraction()
+            # proportional to absolute concentration at fixed box volume.
+            # Normalizing by the supported-Ir target keeps the former
+            # target-sized dose at activity 1 while allowing a 600-atom dose
+            # to start at the physically larger activity 600/248.
+            return self._ir_adsorption_activity()
         return 1.0
 
     def _ir_exchange_total_rate(self) -> float:
@@ -743,35 +755,35 @@ class LocalKMC:
     def _sonication_rate(self) -> float:
         if self.sonication_parameters is None or not self.surface_support.members:
             return 0.0
-        # One KMC corrosion event exists for every current support-solution
-        # interface center.  The family is stored as an n-fold-way aggregate;
-        # _apply_sonication_event chooses the selected center uniformly.
+        # One independent acoustic-condition hazard exists for every current
+        # support-solution interface center.  The aggregate clock fires first;
+        # _apply_sonication_event then chooses its center uniformly.
         return (
             self.sonication_parameters.event_rate
             * len(self.surface_support.members)
         )
 
     def total_rate(self) -> float:
+        """Return the total propensity of chemical KMC reactions only."""
         return (
             self.ce_buckets.total_rate
             + self._ir_exchange_total_rate()
             + self.ir_redox_buckets.total_rate
             + self.diffusion_buckets.total_rate
-            + self._sonication_rate()
         )
 
-    def _draw_event(self) -> tuple[str, Hashable | None, object | None, float]:
+    def _draw_reaction_event(
+        self, total_rate: float
+    ) -> tuple[str, Hashable | None, object | None]:
         ir_exchange_rate = self._ir_exchange_total_rate()
         family_rates = (
             ("ce", self.ce_buckets.total_rate, self.ce_buckets),
             ("ir_exchange", ir_exchange_rate, self.ir_exchange_buckets),
             ("ir_redox", self.ir_redox_buckets.total_rate, self.ir_redox_buckets),
             ("diffusion", self.diffusion_buckets.total_rate, self.diffusion_buckets),
-            ("sonication", self._sonication_rate(), None),
         )
-        total_rate = sum(rate for _, rate, _ in family_rates)
         if not math.isfinite(total_rate) or total_rate <= 0.0:
-            raise RuntimeError("no available KMC events")
+            raise RuntimeError("no available chemical KMC reactions")
         target = self.rng.random() * total_rate
         cumulative = 0.0
         for name, rate, buckets in family_rates:
@@ -784,9 +796,9 @@ class LocalKMC:
                     )
                 else:
                     key, member = buckets.select(target - cumulative, self.rng)
-                return name, key, member, total_rate
+                return name, key, member
             cumulative += rate
-        raise RuntimeError("failed to select KMC event family")
+        raise RuntimeError("failed to select chemical KMC reaction family")
 
     def _apply_drawn_event(self, family: str, key: Hashable | None, member: object) -> str:
         if family == "ce":
@@ -818,8 +830,6 @@ class LocalKMC:
             source, target = member
             self._apply_site_changes({int(source): Species.EMPTY, int(target): Species.IR_ION})
             return IrEventType.IR_ION_DIFFUSION.value
-        if family == "sonication":
-            return self._apply_sonication_event()
         raise RuntimeError(f"unsupported event family {family}")
 
     def _apply_sonication_event(self) -> str:
@@ -852,14 +862,33 @@ class LocalKMC:
         return SonicationEventType.CORROSION.value
 
     def step_once(self, stop_time: float | None = None) -> bool:
-        family, key, member, total_rate = self._draw_event()
-        random_number = max(self.rng.random(), np.finfo(np.float64).tiny)
-        delta_time = -math.log(random_number) / total_rate
+        # Chemical reactions and acoustic corrosion are independent Poisson
+        # clocks.  A corrosion occurrence advances physical time and changes
+        # the lattice, but it is neither selected from the KMC reaction
+        # catalogue nor counted as a KMC step.
+        reaction_rate = self.total_rate()
+        condition_rate = self._sonication_rate()
+        if reaction_rate <= 0.0 and condition_rate <= 0.0:
+            raise RuntimeError("no available reaction or condition events")
+        reaction_dt = math.inf
+        if reaction_rate > 0.0:
+            random_number = max(self.rng.random(), np.finfo(np.float64).tiny)
+            reaction_dt = -math.log(random_number) / reaction_rate
+        condition_dt = math.inf
+        if condition_rate > 0.0:
+            random_number = max(self.rng.random(), np.finfo(np.float64).tiny)
+            condition_dt = -math.log(random_number) / condition_rate
+        delta_time = min(reaction_dt, condition_dt)
         if stop_time is not None and self.state.kmc_time + delta_time > stop_time:
             self.state.kmc_time = stop_time
             return False
-        event_name = self._apply_drawn_event(family, key, member)
         self.state.kmc_time += delta_time
+        if condition_dt < reaction_dt:
+            event_name = self._apply_sonication_event()
+            self.state.condition_event_counts[event_name] += 1
+            return True
+        family, key, member = self._draw_reaction_event(reaction_rate)
+        event_name = self._apply_drawn_event(family, key, member)
         self.state.step += 1
         self.state.event_counts[event_name] += 1
         return True
@@ -920,6 +949,11 @@ class LocalKMC:
         row["net_released_O_atoms"] = int(net_released_o)
         row["net_adsorbed_Ir_atoms"] = int(net_adsorbed_ir)
         row["target_supported_Ir_atoms"] = self.target_supported_ir_atoms
+        row["main_particle_Ir_target_fraction"] = (
+            row["attached_Ir_total"] / self.target_supported_ir_atoms
+            if self.target_supported_ir_atoms
+            else 0.0
+        )
         row["assumed_Ir_retention_fraction"] = (
             self.ir_parameters.precursor_retention_fraction
         )
@@ -928,6 +962,9 @@ class LocalKMC:
             self.state.solution_ir_precursor_atoms
         )
         row["Ir_precursor_fraction_remaining"] = self._ir_precursor_fraction()
+        row["Ir_adsorption_activity_relative_to_target"] = (
+            self._ir_adsorption_activity()
+        )
         solid_ir_atoms = row["number_Ir_ion"] + row["number_Ir"]
         row["Ir_inventory_error_atoms"] = int(
             self.initial_ir_precursor_atoms
@@ -943,7 +980,10 @@ class LocalKMC:
         row["sonication_removed_Ce_atoms"] = self.state.sonication_removed_ce_atoms
         row["sonication_removed_O_atoms"] = self.state.sonication_removed_o_atoms
         row["interface_support_site_count"] = len(self.surface_support.members)
-        row["sonication_total_propensity_per_s"] = self._sonication_rate()
+        condition_frequency = self._sonication_rate()
+        row["sonication_condition_frequency_per_s"] = condition_frequency
+        # Backward-compatible output alias for existing analysis scripts.
+        row["sonication_total_propensity_per_s"] = condition_frequency
         return row
 
     def write_snapshot(
@@ -981,7 +1021,7 @@ class LocalKMC:
                 f"Ir_precursor={self.state.solution_ir_precursor_atoms}/"
                 f"{self.initial_ir_precursor_atoms} "
                 f"{visibility_comment}"
-                f"k_sonication_total={self._sonication_rate():.6e}"
+                f"sonication_condition_frequency={self._sonication_rate():.6e}"
             ),
         )
 
@@ -991,6 +1031,7 @@ class LocalKMC:
             "step": self.state.step,
             "kmc_time": self.state.kmc_time,
             "event_counts": dict(self.state.event_counts),
+            "condition_event_counts": dict(self.state.condition_event_counts),
             "sonication_removed_atoms": self.state.sonication_removed_atoms,
             "sonication_removed_ce_atoms": self.state.sonication_removed_ce_atoms,
             "sonication_removed_o_atoms": self.state.sonication_removed_o_atoms,
@@ -1117,10 +1158,23 @@ def load_local_checkpoint(
     with np.load(filename, allow_pickle=False) as checkpoint:
         lattice.occupation[:] = checkpoint["occupation"]
         state_data = json.loads(str(checkpoint["state"]))
+        event_counts = Counter(state_data["event_counts"])
+        condition_event_counts = Counter(
+            state_data.get("condition_event_counts", {})
+        )
+        # Backward compatibility: older checkpoints stored acoustic
+        # occurrences in the chemical KMC event counter.
+        old_sonication_count = event_counts.pop(
+            SonicationEventType.CORROSION.value, 0
+        )
+        condition_event_counts[SonicationEventType.CORROSION.value] += (
+            old_sonication_count
+        )
         state = LocalKMCState(
             step=int(state_data["step"]),
             kmc_time=float(state_data["kmc_time"]),
-            event_counts=Counter(state_data["event_counts"]),
+            event_counts=event_counts,
+            condition_event_counts=condition_event_counts,
             sonication_removed_atoms=int(state_data["sonication_removed_atoms"]),
             sonication_removed_ce_atoms=int(state_data["sonication_removed_ce_atoms"]),
             sonication_removed_o_atoms=int(state_data["sonication_removed_o_atoms"]),

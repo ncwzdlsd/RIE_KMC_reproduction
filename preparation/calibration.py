@@ -160,10 +160,11 @@ def calibrate(
         initial,
         chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
         chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
+        sonication_chemical_potential_shift_ev=0.0,
     )
     rng = np.random.default_rng(config.random_seed)
     best_scales = np.asarray([1.0, 1.0], dtype=float)
-    best_shift = initial.sonication_chemical_potential_shift_ev
+    best_shift = 0.0
     best_parameters = initial
     best_objective, best_summary = calibration_objective(best_parameters, config)
     history = [
@@ -181,9 +182,7 @@ def calibrate(
     for iteration in range(1, config.iterations + 1):
         cooling = max(0.15, 1.0 - iteration / (config.iterations + 1.0))
         proposed_scales = best_scales * np.exp(rng.normal(0.0, 0.9 * cooling, size=2))
-        proposed_shift = float(
-            np.clip(best_shift + rng.normal(0.0, 0.025 * cooling), 0.0, 0.15)
-        )
+        proposed_shift = best_shift
         candidate = initial.scaled(
             ce_scale=float(proposed_scales[0]),
             sonication_scale=float(proposed_scales[1]),
@@ -214,9 +213,9 @@ def calibrate(
         calibrated=best_objective <= config.acceptance_objective,
         calibration_objective=best_objective,
         calibration_scope=(
-            "Ce/O exchange time scale and per-interface-site sonication "
-            "propensity and sonicated-bath chemical-potential increment "
-            "fitted to Tables S3/S5; "
+            "Ce/O exchange time scale and independent per-interface-site "
+            "sonication-condition frequency fitted to Tables S3/S5 with "
+            "identical fixed -0.60 eV Ce/O chemical potentials; "
             "Ir rates remain "
             "explicit initial estimates"
         ),
