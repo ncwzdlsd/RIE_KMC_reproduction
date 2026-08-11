@@ -30,6 +30,16 @@ Ir 形貌采用论文五类反应内的“扩散后还原”机制：离子态 I
 
 所有正式速率文件使用 `s^-1`。KMC 时钟按 `dt = -ln(u) / sum(k_i)` 推进，不再使用事件数代替实验时间。
 
+## XPK 加速
+
+`--method xpk` 启用 XPK 加速。实现严格采用 XPK 的两阶段结构：在 Ce/O、金属 Ir 和各物种数目固定的化学状态下，只运行 `IR_ION_DIFFUSION` 以采样扩散系综；随后对 Ce/O 交换、Ir 吸附/脱附、Ir 氧化还原和独立超声条件事件的倾向率取系综平均，并以 `dt = -ln(u) / <sum(k_slow)>` 在化学空间推进。扩散采样不推进物理时间、不进入论文反应事件计数，也不会修改任何速率、势垒或化学势。
+
+XPK 比较论文在其 40×40 加氢测试模型中，每个插值点运行 `1.6×10^7` 个纯扩散步，以 `0.04` 覆盖度间隔做线性插值。这些数值会写入元数据作为论文参照，但它们属于该二维测试模型的数值收敛设置，不是本 CeOₓ-Ir 模型的物理参数。本项目的输出包含 CeOₓ 形貌、金属 Ir 位置和包埋关系；把覆盖度相同但形貌不同的状态强行插值会改变复现模型。因此当前实现在每个实际化学状态上直接采样，不跨不同形貌插值。这保留了 XPK 的扩散系综平均和化学空间演化，并消除了额外的覆盖度插值误差。
+
+`--xpk-equilibration-sweeps`、`--xpk-samples` 和 `--xpk-decorrelation-sweeps` 只控制统计收敛，不是物理参数。正式结果必须增大这些值做收敛检查；每次运行采用的值和扩散采样步数都会写入 `run_metadata.json` 与 `metrics.csv`。当前默认仍为 `--method kmc`，只有 XPK 对照达到统计收敛后才应把它用于正式复现，避免未经验证就改变论文结果。
+
+参数文件若给出非 `-0.60 eV` 的 Ce/O 化学势或非零超声化学势增量，主程序现在会直接拒绝运行，而不是静默覆盖输入或在反应过程中改变化学势。
+
 ## 论文参数与代码映射
 
 | 物理量 | 论文值 | 代码常量/参数 |
@@ -71,8 +81,11 @@ python -m pip install numpy
 
 | 文件 | 类型 | 功能 |
 | --- | --- | --- |
-| `run_sonication_comparison.py` | 对照入口 | 无参数运行标准 180 min 有/无超声模拟，也支持覆盖几何、参数和取样时间，并写出轨迹、快照、指标和元数据。 |
-| `local_kmc.py` | 主引擎 | 实现完整局部更新、n-fold-way 化学反应抽样、物理时钟、有限 Ir 储库、独立超声条件时钟、检查点及形貌统计。 |
+| `run_traditional_kmc.py` | 传统 KMC 直接入口 | 直接运行标准 180 min 逐跳 KMC，不需要填写命令行参数。 |
+| `run_xpk_optimized.py` | XPK 直接入口 | 直接运行标准 180 min XPK 模拟，不需要填写命令行参数。 |
+| `run_sonication_comparison.py` | 高级公共入口 | 两个直接入口共用的运行与输出逻辑；需要覆盖几何、参数或采样设置时才直接调用。 |
+| `xpk_kmc.py` | XPK 加速引擎 | 在固定化学状态下执行 Ir 纯扩散采样，对慢事件倾向率取系综平均并在化学空间推进。 |
+| `local_kmc.py` | 基准 KMC 引擎 | 实现完整局部更新、n-fold-way 逐跳抽样、物理时钟、有限 Ir 储库、独立超声条件时钟、检查点及形貌统计。 |
 | `kinetic_parameters.py` | 参数模块 | 定义可序列化的动力学参数集，读取/写入标定文件，并转换为 Ce/O、Ir 和超声子参数。 |
 | `paper_parameters.py` | 论文常量 | 集中保存论文或补充材料可追溯的温度、能量、盒尺寸、时间点、超声参数和 Ir/Ce 比例。 |
 | `constants.py` | 基础枚举 | 定义晶格位点类型、Ce/O/Ir 占据状态和玻尔兹曼常数。 |
@@ -82,7 +95,7 @@ python -m pip install numpy
 | `ir_events.py` | Ir 参数与局域能 | 定义 Ir 事件类型和参数，计算 Ir–Ir、Ir–O 局域结合、异相还原条件及活化速率。 |
 | `sonication_events.py` | 超声参数 | 定义超声腐蚀事件类型，以及 1 nm 作用半径、10% 溶解概率和单位界面位点倾向。 |
 | `preparation/calibrate_parameters.py` | 一次性标定入口 | 直接运行即可按正式默认配置完成参数标定，并写出参数文件及标定报告。 |
-| `preparation/calibration.py` | 一次性标定算法 | 使用补充材料 Table S3/S5 的粒径和溶解数据，拟合 Ce/O 时间尺度、超声倾向和超声浴化学势增量。 |
+| `preparation/calibration.py` | 一次性标定算法 | 使用补充材料 Table S3/S5 的粒径和溶解数据，在两组化学势固定为 `-0.60 eV` 且超声化学势增量固定为零时，拟合 Ce/O 时间尺度和独立超声倾向。 |
 
 主入口为 `run_sonication_comparison.py`；其余模块文件不应单独运行。
 
@@ -114,10 +127,21 @@ py -3 preparation/calibrate_parameters.py
 
 ## 2. 运行 0-180 min 对照
 
-标定完成后直接运行脚本，即可自动加载 `calibrated_parameters.json`，并使用 20 nm 盒、5 nm 初始载体、0/5/30/60/120/180 min 取样点和自动缩放的有限 Ir 储库完成标准对照：
+标定完成后，可直接在 IDE 中分别运行下面两个文件。两者都会自动加载合格的 `calibrated_parameters.json`，并使用 20 nm 盒、5 nm 初始载体、0/5/30/60/120/180 min 取样点和自动缩放的有限 Ir 储库完成标准对照，不需要输入任何额外参数：
 
 ```powershell
-py -3 run_sonication_comparison.py
+py -3 run_traditional_kmc.py
+py -3 run_xpk_optimized.py
+```
+
+传统 KMC 结果写入带时间戳的 `kmc_output/traditional_kmc_180min_*` 目录；XPK 结果写入 `kmc_output/xpk_180min_*`。若需要提高 XPK 采样强度等高级控制，仍可使用公共入口：
+
+```powershell
+py -3 run_sonication_comparison.py `
+  --method xpk `
+  --xpk-equilibration-sweeps 4 `
+  --xpk-samples 16 `
+  --xpk-decorrelation-sweeps 1
 ```
 
 脚本只会自动加载标记为 `calibrated: true` 的 `calibrated_parameters.json`；失败或过期的标定文件会被忽略，并改用内置诊断初值且打印警告。显式传入 `--parameter-file` 仍可检查任意候选文件；需要强制使用通过验收的参数时添加 `--require-calibrated`。
@@ -145,7 +169,7 @@ py -3 run_sonication_comparison.py `
 - `trajectory_ir_only.xyz`：只保留主晶体连接 Ir 的诊断轨迹，用于直接清点团簇和检查背面/包埋 Ir；
 - `snapshots/*.xyz`：每个取样时间点可单独打开的相同过滤结果；
 - `ir_embedding_comparison.csv`：最精简的目标结果，逐时间点对比无超声/有超声的载体连接 Ir、表面 Ir、嵌入 Ir、嵌入比例及超声造成的差值；
-- `metrics.csv`：相同物理时间下的两组指标及差值，包含 Ir 储库、守恒误差、团簇数、盒内未连接 Ir、负载/嵌入 Ir、相对 Table S9 目标的主晶体 Ir 到达比例、`detached_support_atoms`，以及主晶体径向离散度、轴向尺寸比和形状各向异性；
+- `metrics.csv`：相同物理时间下的两组指标及差值，包含 Ir 储库、守恒误差、团簇数、盒内未连接 Ir、负载/嵌入 Ir、相对 Table S9 目标的主晶体 Ir 到达比例、`detached_support_atoms`、XPK 扩散采样步数与化学空间步数，以及主晶体径向离散度、轴向尺寸比和形状各向异性；
 - `run_metadata.json`：参数、单位、事件计数、最终状态和 Ir 嵌入趋势检查。
 
 嵌入趋势检查关注超声后的 Ir 嵌入比例是否高于无超声对照，同时保留 Ir 库存守恒和首个非零时间点可见性的基本一致性检查。

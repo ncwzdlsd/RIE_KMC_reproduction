@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import datetime
 import json
 import math
@@ -24,12 +24,53 @@ from paper_parameters import (
     PAPER_TARGET_TIMES_MIN,
 )
 from sonication_events import SonicationEventType
+from xpk_kmc import (
+    XPKLocalKMC,
+    XPKSamplingParameters,
+    XPK_PAPER_REFERENCE_COVERAGE_INTERVAL,
+    XPK_PAPER_REFERENCE_DIFFUSION_STEPS_PER_POINT,
+)
 
 
 SEPARATION_NM = 8.0
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_PARAMETER_FILE = PROJECT_ROOT / "calibrated_parameters.json"
 DEFAULT_OUTPUT_HINT = PROJECT_ROOT / "kmc_output" / "comparison_180min"
+DEFAULT_METHOD = "kmc"
+XPK_METRIC_NAMES = (
+    "xpk_diffusion_sampling_steps",
+    "xpk_ensemble_evaluations",
+    "xpk_chemical_space_steps",
+    "xpk_zero_diffusion_ensembles",
+)
+
+
+def fixed_paper_setting_conflicts(
+    parameters: KineticParameterSet,
+) -> list[tuple[str, float, float]]:
+    """Return physical settings that conflict with the fixed reproduction."""
+    expected_settings = (
+        (
+            "chemical_potential_ce_ev",
+            parameters.chemical_potential_ce_ev,
+            PAPER_CHEMICAL_POTENTIAL_CE_EV,
+        ),
+        (
+            "chemical_potential_o_ev",
+            parameters.chemical_potential_o_ev,
+            PAPER_CHEMICAL_POTENTIAL_O_EV,
+        ),
+        (
+            "sonication_chemical_potential_shift_ev",
+            parameters.sonication_chemical_potential_shift_ev,
+            0.0,
+        ),
+    )
+    return [
+        (name, actual, expected)
+        for name, actual, expected in expected_settings
+        if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1.0e-12)
+    ]
 
 
 def allocate_run_directory(output_hint: Path | None) -> Path:
@@ -227,6 +268,7 @@ def write_metrics(
         "sonication_total_propensity_per_s",
         "sonication_event_count",
         "sonication_removed_atoms",
+        *XPK_METRIC_NAMES,
     )
     rows = []
     for control, sonicated in zip(control_metrics, sonicated_metrics):
@@ -307,6 +349,8 @@ def run_condition(
             maximum_events=maximum_events_per_interval,
         )
         row = engine.metrics()
+        for metric_name in XPK_METRIC_NAMES:
+            row.setdefault(metric_name, 0)
         row["sample_time_min"] = time_min
         rows.append(row)
         engine.write_snapshot(
@@ -343,6 +387,33 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument(
+        "--method",
+        choices=("xpk", "kmc"),
+        default=DEFAULT_METHOD,
+        help=(
+            "Simulation method. xpk separates diffusion-only sampling from "
+            "chemical-space evolution; kmc retains every physical diffusion hop."
+        ),
+    )
+    parser.add_argument(
+        "--xpk-equilibration-sweeps",
+        type=float,
+        default=1.0,
+        help="Diffusion-only equilibration sweeps per XPK chemical state.",
+    )
+    parser.add_argument(
+        "--xpk-samples",
+        type=int,
+        default=8,
+        help="Diffusion-ensemble samples per XPK chemical state.",
+    )
+    parser.add_argument(
+        "--xpk-decorrelation-sweeps",
+        type=float,
+        default=0.25,
+        help="Diffusion-only sweeps between XPK ensemble samples.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_HINT,
@@ -378,6 +449,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--maximum-events-per-interval must be positive")
     if args.ir_precursor_atoms is not None and args.ir_precursor_atoms <= 0:
         parser.error("--ir-precursor-atoms must be positive")
+    if args.xpk_equilibration_sweeps < 0.0:
+        parser.error("--xpk-equilibration-sweeps must be non-negative")
+    if args.xpk_samples <= 0:
+        parser.error("--xpk-samples must be positive")
+    if args.xpk_decorrelation_sweeps < 0.0:
+        parser.error("--xpk-decorrelation-sweeps must be non-negative")
 
     selected_parameter_file = args.parameter_file
     if selected_parameter_file is None and DEFAULT_PARAMETER_FILE.exists():
@@ -396,18 +473,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         else KineticParameterSet()
     )
     args.parameter_file = selected_parameter_file
-    # Use the same fixed bath for both conditions so their Ir embedding
-    # difference is attributable to the independently applied sonication.
-    # A legacy parameter file may contain the former -0.69 -> -0.60 feedback
-    # settings, so force the selected bath here.
-    parameters = replace(
-        parameters,
-        chemical_potential_ce_ev=PAPER_CHEMICAL_POTENTIAL_CE_EV,
-        chemical_potential_o_ev=PAPER_CHEMICAL_POTENTIAL_O_EV,
-        # Sonication is an external condition only.  Force legacy parameter
-        # files to use the same fixed bath values in both conditions.
-        sonication_chemical_potential_shift_ev=0.0,
-    )
+    # The reproduction uses one fixed bath for both conditions.  Reject an
+    # incompatible file rather than silently modifying a physical parameter.
+    conflicts = fixed_paper_setting_conflicts(parameters)
+    if conflicts:
+        details = ", ".join(
+            f"{name}={actual} (expected {expected})"
+            for name, actual, expected in conflicts
+        )
+        parser.error(
+            f"parameter file conflicts with fixed paper settings: {details}; "
+            "the program will not rewrite them implicitly"
+        )
     if not parameters.calibrated and args.require_calibrated:
         parser.error(
             "the selected kinetic parameters are not calibrated"
@@ -430,20 +507,46 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     control_lattice = copy.deepcopy(initial_lattice)
     sonicated_lattice = copy.deepcopy(initial_lattice)
-    control_engine = LocalKMC(
+    engine_type = XPKLocalKMC if args.method == "xpk" else LocalKMC
+    xpk_sampling = XPKSamplingParameters(
+        equilibration_sweeps=args.xpk_equilibration_sweeps,
+        samples=args.xpk_samples,
+        decorrelation_sweeps=args.xpk_decorrelation_sweeps,
+    )
+    xpk_arguments = {"xpk_sampling": xpk_sampling} if args.method == "xpk" else {}
+    print(
+        f"Simulation method: {args.method.upper()}"
+        + (
+            f" (equilibration={xpk_sampling.equilibration_sweeps} sweeps, "
+            f"samples={xpk_sampling.samples}, "
+            f"decorrelation={xpk_sampling.decorrelation_sweeps} sweeps)"
+            if args.method == "xpk"
+            else ""
+        ),
+        flush=True,
+    )
+    if args.method == "xpk":
+        print(
+            "WARNING: XPK production results require convergence against larger "
+            "diffusion-ensemble settings and the explicit --method kmc baseline.",
+            flush=True,
+        )
+    control_engine = engine_type(
         control_lattice,
         parameters.ceox_parameters(sonication=False),
         parameters.ir_parameters(),
         random_seed=args.seed,
         initial_ir_precursor_atoms=args.ir_precursor_atoms,
+        **xpk_arguments,
     )
-    sonicated_engine = LocalKMC(
+    sonicated_engine = engine_type(
         sonicated_lattice,
         parameters.ceox_parameters(sonication=True),
         parameters.ir_parameters(),
         sonication_parameters=parameters.sonication_parameters(),
         random_seed=args.seed,
         initial_ir_precursor_atoms=args.ir_precursor_atoms,
+        **xpk_arguments,
     )
 
     root = allocate_run_directory(args.output)
@@ -522,6 +625,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         "kinetic_parameters": asdict(parameters),
         "rate_unit": "s^-1",
         "time_unit": "s",
+        "simulation_method": args.method,
+        "xpk_sampling": (
+            asdict(xpk_sampling) if args.method == "xpk" else None
+        ),
+        "xpk_sampling_convergence_required": args.method == "xpk",
+        "xpk_paper_reference_sampling": (
+            {
+                "diffusion_steps_per_interpolation_point": (
+                    XPK_PAPER_REFERENCE_DIFFUSION_STEPS_PER_POINT
+                ),
+                "coverage_interval": XPK_PAPER_REFERENCE_COVERAGE_INTERVAL,
+                "interpolation": "linear",
+                "scope": "paper_hydrogenation_test_not_transplanted_as_a_physical_parameter",
+            }
+            if args.method == "xpk"
+            else None
+        ),
         "output_directory": str(root.resolve()),
         "output_policy": "unique_timestamped_directory_never_overwrite",
         "environment_model": {
@@ -547,7 +667,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             "ir_to_ce_atom_ratio": parameters.precursor_ir_to_ce_atom_ratio,
             "assumed_ir_retention_fraction": parameters.precursor_retention_fraction,
             "ir_capacity_basis": "user_requested_approximately_600_atom_precursor_dose_for_standard_5nm_support_while_Table_S9_defines_the_separate_supported_Ir_target",
-            "ir_diffusion": "nearest_neighbor_hops_over_all_solution_accessible_empty_M_sites",
+            "ir_diffusion": (
+                "XPK_diffusion_only_ensemble_sampling_excluded_from_physical_time"
+                if args.method == "xpk"
+                else "nearest_neighbor_hops_over_all_solution_accessible_empty_M_sites"
+            ),
+            "xpk_fast_subspace": (
+                "Ir_ion_diffusion_only" if args.method == "xpk" else None
+            ),
+            "xpk_slow_subspace": (
+                "Ce_O_exchange_Ir_exchange_Ir_redox_and_independent_sonication"
+                if args.method == "xpk"
+                else None
+            ),
+            "xpk_interpolation": (
+                "disabled_to_avoid_merging_distinct_CeOx_and_metallic_Ir_morphologies"
+                if args.method == "xpk"
+                else None
+            ),
             "ir_reduction": "only_at_support_or_existing_metallic_Ir_attachment_sites",
             "xyz_visibility": "largest_CeOx_component_and_only_Ir_clusters_connected_to_that_main_particle; detached_fragments_and_transport_Ir_remain_in_KMC_state",
             "ir_morphology": "diffusion_dominated_ionic_relaxation_before_reduction",
