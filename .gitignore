@@ -1,6 +1,5 @@
 /kmc_output
-/__pycache__
+__pycache__/
 /tmp
-/preparation/__pycache__
 calibrated_parameters_report.json
 calibrated_parameters.json

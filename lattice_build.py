@@ -47,17 +47,6 @@ class Lattice:
     def get_m_m_neighbors(self,site_id) -> np.ndarray:
         return self.m_m_neighbors[site_id,:self.m_m_neighbor_count[site_id]]
 
-def pack_neighbor_lists(neighbor_lists,max_width):
-    number_of_sites=len(neighbor_lists)
-    neighbors=np.full((number_of_sites,max_width),-1,dtype=np.int32)
-
-    counts=np.zeros(number_of_sites,dtype=np.uint8)
-    for site_id,ids in enumerate(neighbor_lists):
-        counts[site_id]=len(ids)
-        neighbors[site_id,:len(ids)]=ids
-
-    return neighbors,counts
-
 # ncells is the number of conventional unit cells along each axis
 def build_fluorite_lattice(ncells,lattice_constant_nm:float=0.541)->Lattice:
     if ncells <= 0:
@@ -126,19 +115,3 @@ def build_fluorite_lattice(ncells,lattice_constant_nm:float=0.541)->Lattice:
         center_nm=center_nm,
         lattice_constant_nm=lattice_constant_nm,
     )
-
-# def validate_lattice(lattice:Lattice) -> dict[str,int]:
-#     m = lattice.site_type == SiteType.M
-#     o = lattice.site_type == SiteType.O
-#     result = {
-#         "sites": lattice.nsites,
-#         "m_sites": int(np.count_nonzero(m)),
-#         "o_sites": int(np.count_nonzero(o)),
-#         "max_ce_coordination": int(lattice.ce_o_neighbor_count[m].max()),
-#         "max_o_coordination": int(lattice.ce_o_neighbor_count[o].max()),
-#         "max_m_neighbors": int(lattice.m_m_neighbor_count[m].max()),
-#     }
-#     assert result["max_ce_coordination"] == 8
-#     assert result["max_o_coordination"] == 4
-#     assert result["max_m_neighbors"] == 12
-#     return result

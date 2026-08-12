@@ -162,19 +162,18 @@ py -3 run_sonication_comparison.py `
 
 ## 输出
 
-每次运行默认只保留：
+每次运行默认保留以下三套轨迹及其逐时间点快照。标准设置下，每套均包含 0、5、30、60、120、180 min 六帧，且每帧都把无超声组和有超声组并排写入同一个 XYZ 文件：
 
-- `trajectory.xyz`：0、5、30、60、120、180 min 的有/无超声并排结构轨迹，只显示最大 CeOₓ 连通主晶体以及与该主晶体连接的 Ir；脱落的 Ce/O/Ir 碎片不再混入主颗粒图像；
-- `trajectory_ir_emphasis.xyz`：相同物理状态的 Ir 强调轨迹，写入 OVITO 可识别的 `Radius` 和 `Transparency` 属性，使 Ce/O 半透明并放大 Ir，不改变任何 KMC 状态；
-- `trajectory_ir_only.xyz`：只保留主晶体连接 Ir 的诊断轨迹，用于直接清点团簇和检查背面/包埋 Ir；
-- `snapshots/*.xyz`：每个取样时间点可单独打开的相同过滤结果；
+- `trajectory.xyz` 与 `snapshots/snapshot_<序号>_<时间>min.xyz`：结构轨迹及对应的单帧文件，只显示最大 CeOₓ 连通主晶体以及与该主晶体连接的 Ir；脱落的 Ce/O/Ir 碎片和仍在盒内迁移的 Ir 不混入主颗粒图像；
+- `trajectory_ir_emphasis.xyz` 与 `snapshots_ir_emphasis/snapshot_<序号>_<时间>min.xyz`：相同物理状态的 Ir 强调版本，写入 OVITO 可识别的 `Radius` 和 `Transparency` 属性，使 Ce/O 半透明并放大 Ir，不改变任何 KMC 状态；
+- `trajectory_ir_only.xyz` 与 `snapshots_ir_only/snapshot_<序号>_<时间>min.xyz`：只保留与主晶体连接 Ir 的诊断版本，用于直接清点团簇和检查背面/包埋 Ir；
 - `ir_embedding_comparison.csv`：最精简的目标结果，逐时间点对比无超声/有超声的载体连接 Ir、表面 Ir、嵌入 Ir、嵌入比例及超声造成的差值；
 - `metrics.csv`：相同物理时间下的两组指标及差值，包含 Ir 储库、守恒误差、团簇数、盒内未连接 Ir、负载/嵌入 Ir、相对 Table S9 目标的主晶体 Ir 到达比例、`detached_support_atoms`、XPK 扩散采样步数与化学空间步数，以及主晶体径向离散度、轴向尺寸比和形状各向异性；
 - `run_metadata.json`：参数、单位、事件计数、最终状态和 Ir 嵌入趋势检查。
 
 嵌入趋势检查关注超声后的 Ir 嵌入比例是否高于无超声对照，同时保留 Ir 库存守恒和首个非零时间点可见性的基本一致性检查。
 
-添加 `--keep-checkpoints` 时会额外保留两组最新检查点。OVITO 中直接打开 `trajectory.xyz`，按 `condition` 着色：`0` 为无超声，`1` 为有超声。
+默认情况下，用于组装上述成品文件的 `_raw` 临时目录会在运行结束时删除。添加 `--keep-checkpoints` 后，程序会保留 `_raw/no_sonication/checkpoint_latest.npz` 和 `_raw/sonication/checkpoint_latest.npz` 两组最新检查点，并删除其中已经汇总到成品轨迹的原始快照。OVITO 中可直接打开任一 `trajectory*.xyz`；按 `condition` 着色时，`0` 为无超声，`1` 为有超声。
 
 ## 局部更新引擎
 

@@ -13,8 +13,6 @@ from pathlib import Path
 import shutil
 from collections.abc import Sequence
 
-import numpy as np
-
 from generation import build_initial_lattice
 from kinetic_parameters import KineticParameterSet
 from local_kmc import LocalKMC
